@@ -1,0 +1,31 @@
+
+# release cycle
+
+warpctl stage --next --beta
+# cd into a service
+make
+warpctl deploy-beta canary myservice --percent=1
+warpctl deploy-beta canary myservice --percent=50
+warpctl deploy-beta canary myservice --percent=100
+
+warpctl stage --release
+# cd into a service
+make
+warpctl deploy-release canary myservice --percent=1
+warpctl deploy-release canary myservice --percent=50
+warpctl deploy-release canary myservice --percent=100
+
+
+
+# server setup
+
+warpctl install-key-updater canary
+warpctl install-lb canary eno1
+
+warpctl install canary myservice beta
+warpctl install canary myservice g1
+
+
+
+
+

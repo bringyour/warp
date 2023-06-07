@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
  && rm -rf /var/lib/apt/lists/*
 RUN update-ca-certificates
 
-COPY bin/$TARGETPLATFORM/keys-updater /usr/local/bin/warp-keys-updater
+COPY build/$TARGETPLATFORM/keys-updater /usr/local/bin/warp-keys-updater
 
 RUN mkdir -p /root/keys
 COPY $WARP_KEYS_HOME/$WARP_ENV/ /root/keys/${WARP_VERSION}/

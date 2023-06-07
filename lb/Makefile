@@ -2,14 +2,13 @@
 all: clean build image
 
 clean:
-   rm -rf build
+	rm -rf build
 
 build:
-   # generate the config
-   mkdir -p build/${WARP_ENV}
-   warpctl lb create-config ${WARP_ENV} > build/${WARP_ENV}/nginx.conf
+	# generate the config
+	mkdir -p build/${WARP_ENV}
+	warpctl lb create-config ${WARP_ENV} > build/${WARP_ENV}/nginx.conf
 
 image:
-   export WARP_VERSION=$(warpctl ls version -b)
-   # --no-cache to always regenerate the encryption data
-   docker buildx build --platform linux/arm64/v8,linux/amd64 . -t ${WARP_REPO}/${WARP_ENV}-lb:${WARP_VERSION} --no-cache --push
+	# --no-cache to always regenerate the encryption data
+	docker buildx build --platform linux/arm64/v8,linux/amd64 . -t ${WARP_REPO}/${WARP_ENV}-lb:${WARP_VERSION} --no-cache --push

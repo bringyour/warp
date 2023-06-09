@@ -11,5 +11,6 @@ RUN update-ca-certificates
 COPY build/$TARGETPLATFORM/keys-updater /usr/local/bin/warp-keys-updater
 
 RUN mkdir -p /root/keys
+# FIXME the Makefile will need to copy the source into build
 COPY $WARP_KEYS_HOME/$WARP_ENV/ /root/keys/${WARP_VERSION}/
 CMD ["/usr/local/bin/warp-keys-updater", "/root/keys/${WARP_VERSION}"]

@@ -11,4 +11,4 @@ build:
 
 image:
 	# --no-cache to always regenerate the encryption data
-	docker buildx build --platform linux/arm64/v8,linux/amd64 . -t ${WARP_REPO}/${WARP_ENV}-lb:${WARP_VERSION} --no-cache --push
+	docker buildx build --platform linux/arm64/v8,linux/amd64 . -t ${WARP_NAMESPACE}/${WARP_ENV}-lb:${WARP_VERSION} --no-cache --push

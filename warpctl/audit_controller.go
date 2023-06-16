@@ -15,3 +15,28 @@ func announceDeployEnded(env string, service string, deployBlocks []string, depl
 	// post to discord
 }
 
+
+
+func announceRunWaitForVersion() {
+
+}
+
+func announceRunWaitForKeys() {
+
+}
+
+func announceRunStart() {
+
+}
+
+func announceRunError()	{
+
+}
+
+func announceRunFail() {
+
+}
+
+func announceRunSuccess() {
+
+}

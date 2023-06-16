@@ -7,7 +7,9 @@ clean:
 build:
 	# generate the config
 	mkdir -p build/${WARP_ENV}
-	warpctl lb create-config ${WARP_ENV} > build/${WARP_ENV}/nginx.conf
+	for block in `warpctl lb list-blocks ${WARP_ENV}`; do
+		warpctl lb create-config ${WARP_ENV} ${block} > build/${WARP_ENV}/nginx.conf/${block}.conf
+	done
 
 image:
 	# --no-cache to always regenerate the encryption data

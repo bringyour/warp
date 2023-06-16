@@ -11,6 +11,9 @@ import (
     "math"
     "reflect"
     "sort"
+    "syscall"
+    "os/signal"
+    "errors"
 
     "golang.org/x/exp/maps"
 
@@ -72,21 +75,14 @@ const WARP_VERSION = "1.0.0"
 
 
 
+// FIXME dns sync [--down_hosts=<hosts>]
+
+
+
+
 // needs a docker hub user access token
 func main() {
-    usage := `Warp control. Zero downtime continuous release.
-
-The warp lifecycle is:
-1. Stage a version
-2. Build services
-   This includes signing and pushing docker images.
-3. Deploy services
-   This includes tagging docker images in a repo as "latest".
-4. Run services
-   This includes watching for image attributes and starting new containers while draining old ones.
-   Zero downtime means routing new connections to the new containers while the old ones drain.
-
-Steps 1-3 happen on a developer or build machine. Step 4 happens on production machines in the target environment.
+    usage := `Warp control. Fluid iteration and zero downtime continuous release.
 
 Usage:
     warpctl init
@@ -95,7 +91,7 @@ Usage:
         [--dockerhub_token=<dockerhub_token>]
         [--vault_home=<vault_home>]
         [--keys_home=<keys_home>]
-        [--lbdomain=<lbdomain>]
+        [--site_home=<site_home>]
     warpctl stage version (local | sync | next (beta | release) --message=<message>)
     warpctl build <env> <Makefile>
     warpctl deploy <env> <service>
@@ -108,8 +104,17 @@ Usage:
     warpctl ls services [<env>]
     warpctl ls service-blocks [<env> [<service>]]
     warpctl ls versions [<env> [<service>]]
-    warpctl lb create-config <env>
-    warpctl service run <env> <service> <block> [<portblocks>] [<table>]
+    warpctl lb list-blocks <env>
+    warpctl lb list-hostnames <env>
+    warpctl lb create-configs <env> [<block>] [--envalias=<envalias>]
+    warpctl runlocal <Makefile> [--envalias=<envalias>]
+    warpctl service run <env> <service> <block>
+        --portblocks=<portblocks>
+        [--rttable=<rttable> --dockernet=<dockernet>]
+        --services_dockernet=<services_dockernet>
+        [--mount_vault=<mount_vault_mode>]
+        [--mount_keys=<mount_keys_mode>]
+        [--mount_site=<mount_site_mode>]
     warpctl service create-unit <env> <service> <block>
         [--target_warp_home=<target_warp_home>]
     warpctl create-units <env> --outdir=<outdir>
@@ -121,15 +126,20 @@ Options:
     --docker_namespace=<docker_namespace>      Your docker namespace. Docker repos are namespace/env-service.
     --dockerhub_username=<dockerhub_username>  Your dockerhub username.
     --dockerhub_token=<dockerhub_token>        Your dockerhub token.
-    --vault_home=<vault_home>  Secure vault home (keys-red).
+    --vault_home=<vault_home>  Secure vault home (keys-red). For local usage, the services.yml will live at <vault_home>/<env>/services.yml
     --keys_home=<keys_home>    Keys home.
-    --lbdomain=<lbdomain>      Load balancer domain. The lb is accessible at <env>-lb.<lbdomain>
     --message=<message>        Version stage message.
     --percent=<percent>        Deploy to a percent of blocks, ordered lexicographically with beta first.
                                The block count is rounded up to the nearest int. 
     -b                         Include the build timestamp in the version. Use this for builds.
     -d                         Docker safe version (converts + to -).
-    --target_warp_home=<target_warp_home>  WARP_HOME for the unit.
+    --portblocks=<portblocks>
+    --rttable=<rttable>
+    --dockernet=<dockernet>
+    --services_dockernet=<services_dockernet>  
+    --mount_vault=<mount_vault_mode>           One of: no, yes 
+    --mount_keys=<mount_keys_mode>             One of: no, yes, root. Root mode allows the keys to be written, e.g. the keys-updater
+    --target_warp_home=<target_warp_home>      WARP_HOME for the unit.
     --outdir=<outdir>          Output dir.`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], WARP_VERSION)
@@ -330,7 +340,8 @@ func build(opts docopt.Opts) {
     // WARP_HOME (inherited)
     // WARP_VERSION_HOME (inherited)
     // WARP_VAULT_HOME
-    // WARP_KEYS_HOME
+    // WARP_KEYS_HOME   FIXME WARP_CONFIG_HOME
+    //                  FIXME WARP_LOCAL_HOME
     // WARP_NAMESPACE
     // WARP_VERSION
     // WARP_ENV
@@ -446,7 +457,7 @@ func deploy(opts docopt.Opts) {
 
     fmt.Printf("Selected version %s\n", deployVersion)
 
-    blocks := listBlocks(env, service)
+    blocks := getBlocks(env, service)
 
     deployBlocks := []string{}
 
@@ -569,35 +580,44 @@ func lsServices(opts docopt.Opts) {
             continue
         }
         for _, service := range serviceMeta.services {
-            // FIXME limit the blocks to only blocks inside this list, and print blocks in this order
-            // blocks := listBlocks(env, service)
+            blocks := getBlocks(env, service)
 
             if versionMeta, ok := serviceMeta.envVersionMetas[env][service]; ok {
-                count := 0
-                versionCounts := map[*semver.Version]int{}
-                for _, version := range versionMeta.latestBlocks {
-                    count += 1
-                    versionCounts[version] += 1
-                }
-                versions := maps.Keys(versionCounts)
-                semver.Sort(versions)
-                histoParts := []string{}
-                for _, version := range versions {
-                    versionCount := versionCounts[version]
-                    histoPart := fmt.Sprintf("%.1f %s", 100.0 * versionCount / count, version.String())
-                    histoParts = append(histoParts, histoPart)
-                }
-
-                blockParts := []string{}
+                var versionsSummary string
                 if len(versionMeta.latestBlocks) == 0 {
-                    blockParts = append(blockParts, "no deployed blocks")
+                    versionsSummary = "no deployed blocks"
                 } else {
-                    for block, version := range versionMeta.latestBlocks {
-                        blockParts = append(blockParts, fmt.Sprintf("%s=%s", block, version.String()))
+                    count := 0
+                    versionCounts := map[*semver.Version]int{}
+                    for _, version := range versionMeta.latestBlocks {
+                        count += 1
+                        versionCounts[version] += 1
                     }
+                    versions := maps.Keys(versionCounts)
+                    semver.Sort(versions)
+                    histoParts := []string{}
+                    for _, version := range versions {
+                        versionCount := versionCounts[version]
+                        histoPart := fmt.Sprintf("%.1f %s", 100.0 * versionCount / count, version.String())
+                        histoParts = append(histoParts, histoPart)
+                    }
+
+                    blockParts := []string{}
+                    for _, block := range blocks {
+                        if version, ok := versionMeta.latestBlocks[block]; ok {
+                            blockPart := fmt.Sprintf("%s=%s", block, version.String())
+                            blockParts = append(blockParts, blockPart)
+                        }
+                    }
+
+                    versionsSummary = fmt.Sprintf(
+                        "%s: %s",
+                        strings.Join(histoParts, " "),
+                        strings.Join(blockParts, " "),
+                    )
                 }
 
-                fmt.Printf("%s-%s (%s: %s)\n", env, service, strings.Join(histoParts, " "), strings.Join(blockParts, " "))
+                fmt.Printf("%s-%s (%s)\n", env, service, versionsSummary)
             }
         }
     }
@@ -728,23 +748,107 @@ func lsVersions(opts docopt.Opts) {
     }
 }
 
-
-// FIXME lb can have one or more secret prefixes in the site config
-// FIXME these will be at the start of the routes, so that only clients that know the secret can access the route
 func lbCreateConfig(opts docopt.Opts) {
     // FIXME read the site meta data
     fmt.Printf("nginx config\n")
 
     // FIXME lb.go
+    nginxConfig := NewNginxConfig(env)
+    blockConfigs := nginxConfig.generate()
+
+    // if one block, print the config for that block without a header
+    // if more than one block, add a header before each block
 }
 
 
 func serviceRun(opts docopt.Opts) {
-    // must have root permissions
-    // for lb, set up route table; set up lb network; add lb network to service network
-    // 
+    // note the options are usually generated by `serviceCreateUnit` which parses the service spec
 
-    // FIXME run.go
+    env, err := opts.String("<env>")
+    if err != nil {
+        panic(err)
+    }
+
+    service, err := opts.String("<service>")
+    if err != nil {
+        panic(err)
+    }
+
+    block, err := opts.String("<block>")
+    if err != nil {
+        panic(err)
+    }
+
+    portBlocksStr, err := opts.String("--portblocks")
+    if err != nil {
+        panic(err)
+    }
+    portBlocks := parsePortBlocks(portBlocksStr)
+
+    servicesDockerNetStr, err := opts.String("--services_dockernet")
+    if err != nil {
+        panic(err)
+    }
+    servicesDockerNetwork := parseDockerNetwork(servicesDockerNetStr)
+
+    var routingTable *RoutingTable
+    var dockerNetwork *DockerNetwork
+
+    if _, ok := opts["--rttable"]; ok {
+        routingTableStr, err := opts.String("--rttable")
+        if err != nil {
+            panic(err)
+        }
+        routingTable = parseRoutingTable(routingTableStr)
+
+        dockerNetStr, err := opts.String("--dockernet")
+        if err != nil {
+            panic(err)
+        }
+        dockerNetwork = parseDockerNetwork(dockerNetStr)
+    }
+
+    var vaultMountMode string
+    var keysMountMode string
+
+    if mode, err := opts.String("--mount_vault"); err == nil {
+        switch mode {
+        case MOUNT_MODE_YES, MOUNT_MODE_NO:
+            vaultMountMode = mode
+        default:
+            panic(errors.New(fmt.Sprintf("Vault mount mode must be one of: %s, %s", MOUNT_MODE_YES, MOUNT_MODE_NO)))
+        }
+    } else {
+        vaultMountMode = MOUNT_MODE_YES
+    }
+
+    if mode, err := opts.String("--mount_keys"); err == nil {
+        switch mode {
+        case MOUNT_MODE_YES, MOUNT_MODE_NO, MOUNT_MODE_ROOT:
+            keysMountMode = mode
+        default:
+            panic(errors.New(fmt.Sprintf("Keys mount mode must be one of: %s, %s, %s", MOUNT_MODE_YES, MOUNT_MODE_NO, MOUNT_MODE_ROOT)))
+        }
+    } else {
+        keysMountMode = MOUNT_MODE_YES
+    }
+
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGQUIT)
+    signal.Notify(quit, syscall.SIGTERM)
+    runWorker := &RunWorker{
+        env: env,
+        service: service,
+        block: block,
+        portBlocks: portBlocks,
+        servicesDockerNetwork: servicesDockerNetwork,
+        routingTable: routingTable,
+        dockerNetwork: dockerNetwork,
+        vaultMountMode: vaultMountMode,
+        keysMountMode: keysMountMode,
+        quit: quit,
+    }
+    runWorker.run()
 }
 
     

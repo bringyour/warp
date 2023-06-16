@@ -1,0 +1,61 @@
+# hostnames use reverse flattened notation,
+# e.g. "service.canary.bringyour.com" has hostname canary-service.bringyour.com
+# this must be done for wildcard certs of the domain which cover only one level
+
+domain: bringyour.com
+# if defined, this is the url of the web app
+cors_host: bringyour.com
+hidden_prefixes:
+    - callused-bronchus-eastern-quinine
+    - formosa-eat-rookie-trow
+# lb uses the same hidden prefixes unless specified below
+lb_hidden_prefixes:
+    - virgo-arkansas-mao-zircon
+    - breaker-gawk-sanskrit-mudd
+
+versions:
+# append new versions to the top
+# The head version is the latest spec, but older versions are needed to keep the ports consistent with the following rules.
+# These rules are needed in the case when a single live host is updated across many versions,
+# which takes in account running services deployed in various cadence and router forwarding to the host.
+# RULES:
+# 1. Once an internal port is associated to a service-block, it can never be associated to another service-block.
+# 2. Each service-block-<serviceport> has a fixed external port that will never change.
+#    If the port is removed from the exteral ports list, that is a config error.
+-   external_ports: 80,443,7000-7200
+    internal_ports: 7201-9000
+    parallel_block_count: 30
+    services_docker_network: warpservices
+    lb:
+        ports:
+            # <externalport> -> <port> forces an external port
+            - 80 -> 80
+            - 443 -> 443
+        interfaces:
+            # each <host>-<interface> is a block
+            by-us-fmt-1-edge-0.bringyour.com:
+                en0:
+                    docker_network: warpen0
+                    concurrent_clients: 753664
+                    cores: 92
+    services:
+        web:
+            # expose these hostnames as aliases for the service.
+            # The aliases must be covered by the same tls cert as the domain
+            # expose_aliases:
+            #     - bringyour.com
+            # if false, no entry is created for <env>-<service>.<domain>
+            # exposed: false
+            # if false, no route is created for <env>-lb.<domain>
+            # lb_exposed: true
+            # if no hosts list, all lb hosts are used
+            # hosts:
+            #   - by-us-fmt-1-edge-0.bringyour.com
+            ports:
+                - 80
+            blocks:
+                - beta: 1
+                - g1: 24
+                - g2: 25
+                - g3: 25
+                - g4: 25

@@ -41,7 +41,6 @@ type WarpSettings struct {
     DockerHubToken *string `json:"dockerHubToken,omitempty"`
     VaultHome *string `json:"vaultHome,omitempty"`
     KeysHome *string `json:"keysHome,omitempty"`
-    LbDomain *string `json:"lbDomain,omitempty"`
 }
 
 
@@ -254,7 +253,7 @@ func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
 }
 
 func (self *DockerHubClient) AddAuthorizationHeader(request *http.Request) {
-	fmt.Printf("Authorization: Bearer %s\n", self.token)
+	// fmt.Printf("Authorization: Bearer %s\n", self.token)
 	request.Header.Add("Authorization", fmt.Sprintf("Bearer %s", self.token))
 }
 
@@ -291,7 +290,7 @@ func getServiceMeta() *ServiceMeta {
 
     url := client.NamespaceUrl("/repositories")
     for {
-    	fmt.Printf("%s\n", url)
+    	// fmt.Printf("%s\n", url)
 	    reposRequest, err := http.NewRequest("GET", url, nil)
 	    if err != nil {
 	    	panic(err)
@@ -405,9 +404,9 @@ func getVersionMeta(env string, service string) *VersionMeta {
 			if result.Status == "active" {
 				for _, tag := range result.Tags {
 					if tag.IsCurrent {
-						fmt.Printf("tag %s %t\n", tag.Tag, tag.IsCurrent)
+						// fmt.Printf("tag %s %t\n", tag.Tag, tag.IsCurrent)
 						if version, err := semver.NewVersion(tag.Tag); err == nil {
-							fmt.Printf("v %s %t\n", version, tag.IsCurrent)
+							// fmt.Printf("v %s %t\n", version, tag.IsCurrent)
 							imageVersions = append(imageVersions, version)
 							versionsMap[version] = true
 						}
@@ -443,9 +442,9 @@ func getVersionMeta(env string, service string) *VersionMeta {
 }
 
 
-func pollLbStatusUntil(env string, service string, sampleCount int, lbStatusUrls []string, targetVersion string) {
+func pollStatusUntil(env string, service string, sampleCount int, statusUrls []string, targetVersion string) {
 	for {
-        statusVersions := sampleLbStatusVersions(20, lbStatusUrls)
+        statusVersions := sampleLbStatusVersions(20, statusUrls)
 
         serviceCount := 0
         serviceVersions := []*semver.Version{}
@@ -508,46 +507,51 @@ type StatusVersions struct {
 }
 
 
-type LbStatusResponse struct {
+type WarpStatusResponse struct {
 	Version string `json:"version"`
 	KeysVersion string `json:"keysVersion"`
 	Status string `json:"status"`
 }
 
-
-func sampleLbStatusVersions(sampleCount int, lbStatusUrls []string) *StatusVersions {
+func (self *WarpStatusResponse) IsError() bool {
 	// if status starts with error it is recorded as an error
 	errorRegex := regexp.MustCompile("^(?i)error\\s")
+	return errorRegex.MatchString(self.Status)
+}
+
+
+func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions {
+	
 
 	resultsMutex := sync.Mutex{}
 	versions := map[*semver.Version]int{}
 	keysVersions := map[*semver.Version]int{}
 	errors := map[string]int{}
 
-	addResults := func(lbStatusResponse *LbStatusResponse) {
+	addResults := func(statusResponse *WarpStatusResponse) {
 		resultsMutex.Lock()
 		defer resultsMutex.Unlock()
 
-		version, err := semver.NewVersion(lbStatusResponse.Version)
+		version, err := semver.NewVersion(statusResponse.Version)
 		if err == nil {
 			versions[version] += 1
 		} else {
 			errors["error status bad version"] += 1
 		}
 
-		keysVersion, err := semver.NewVersion(lbStatusResponse.KeysVersion)
+		keysVersion, err := semver.NewVersion(statusResponse.KeysVersion)
 		if err == nil {
 			keysVersions[keysVersion] += 1
 		} else {
 			errors["error status bad keys version"] += 1
 		}
 
-		if errorRegex.MatchString(lbStatusResponse.Status) {
-			errors[lbStatusResponse.Status] += 1
+		if statusResponse.IsError() {
+			errors[statusResponse.Status] += 1
 		}
 	}
 
-	sample := func(sem *semaphore.Weighted, lbStatusUrl string) {
+	sample := func(sem *semaphore.Weighted, statusUrl string) {
 		// do not use connection re-use or keep alives
 		// each request should be a new connection
 		httpClient := &http.Client{
@@ -564,38 +568,38 @@ func sampleLbStatusVersions(sampleCount int, lbStatusUrls []string) *StatusVersi
 	        },
 	    }
 
-	    sampleOne := func() *LbStatusResponse {
-	    	statusRequest, err := http.NewRequest("GET", lbStatusUrl, nil)
+	    sampleOne := func() *WarpStatusResponse {
+	    	statusRequest, err := http.NewRequest("GET", statusUrl, nil)
 			if err != nil {
-				return &LbStatusResponse{
+				return &WarpStatusResponse{
 		    		Status: "error could not create request",
 		    	}
 			}
 			statusResponse, err := httpClient.Do(statusRequest)
 			if err != nil {
-		    	return &LbStatusResponse{
+		    	return &WarpStatusResponse{
 		    		Status: "error status request failed",
 		    	}
 			}
 			if statusResponse.StatusCode != 200 {
-				return &LbStatusResponse{
+				return &WarpStatusResponse{
 		    		Status: fmt.Sprintf("error http status %d", statusResponse.StatusCode),
 		    	}
 			}
 
-			var lbStatusResponse LbStatusResponse
+			var statusResponse WarpStatusResponse
 			body, err := io.ReadAll(statusResponse.Body)
 		    if err != nil {
 		    	panic(err)
 		    }
-	    	err = json.Unmarshal(body, &lbStatusResponse)
+	    	err = json.Unmarshal(body, &statusResponse)
 	    	if err != nil {
-	    		return &LbStatusResponse{
+	    		return &WarpStatusResponse{
 		    		Status: fmt.Sprintf("error could not parse status"),
 		    	}
 	    	}
 
-			return &lbStatusResponse
+			return &statusResponse
 	    }
 
 		for i := 0; i < sampleCount; i += 1 {
@@ -606,11 +610,11 @@ func sampleLbStatusVersions(sampleCount int, lbStatusUrls []string) *StatusVersi
 
 
 	sem := semaphore.NewWeighted(0)
-	for _, lbStatusUrl := range lbStatusUrls {
-		go sample(sem, lbStatusUrl)
+	for _, statusUrl := range statusUrls {
+		go sample(sem, statusUrl)
 	}
 
-	sem.Acquire(context.Background(), int64(len(lbStatusUrls)))
+	sem.Acquire(context.Background(), int64(len(statusUrls)))
 
 	return &StatusVersions{
 		versions: versions,
@@ -620,48 +624,103 @@ func sampleLbStatusVersions(sampleCount int, lbStatusUrls []string) *StatusVersi
 }
 
 
-func pollBlockStatusUntil(env string, service string, blocks []string, targetVersion string) {
-	state := getWarpState()
+func pollLbBlockStatusUntil(env string, service string, blocks []string, targetVersion string) {
+	if !IsLbExposed(env, service) {
+		// the service is not externally exposed
+		return
+	}
+
+	domain := getDomain(env)
+	hiddenPrefix := getLbHiddenPrefix(env)
 
     blockStatusUrls := []string{}
     for _, block := range blocks {
-    	// FIXME support private prefix also
-        blockStatusUrl := fmt.Sprintf(
-        	"%s-lb.%s/by/b/%s/%s/status",
-        	env,
-        	state.warpSettings.LbDomain,
-        	service,
-        	block,
-        )
+    	var blockStatusUrl string
+    	if hiddenPrefix == "" {
+	        blockStatusUrl = fmt.Sprintf(
+	        	"%s-lb.%s/by/b/%s/%s/status",
+	        	env,
+	        	domain,
+	        	service,
+	        	block,
+	        )
+	    } else {
+	    	blockStatusUrl = fmt.Sprintf(
+	        	"%s-lb.%s/%s/by/b/%s/%s/status",
+	        	env,
+	        	domain,
+	        	hiddenPrefix,
+	        	service,
+	        	block,
+	        )
+	    }
         blockStatusUrls = append(blockStatusUrls, blockStatusUrl)
     }
 
-    pollLbStatusUntil(env, service, 20, blockStatusUrls, targetVersion)
+    pollStatusUntil(env, service, 20, blockStatusUrls, targetVersion)
+}
+
+
+func pollLbServiceStatusUntil(env string, service string, targetVersion string) {
+	if !IsLbExposed(env, service) {
+		// the service is not externally exposed
+		return
+	}
+
+	domain := getDomain()
+	hiddenPrefix := getLbHiddenPrefix(env)
+
+	var serviceStatusUrl string
+	if hiddenPrefix == "" {
+		serviceStatusUrl = fmt.Sprintf(
+			"%s-lb.%s/by/service/%s/status",
+			env,
+			domain,
+			service,
+		)
+	} else {
+		serviceStatusUrl = fmt.Sprintf(
+			"%s-lb.%s/%s/by/service/%s/status",
+			env,
+			domain,
+			hiddenPrefix,
+			service,
+		)
+	}
+
+    pollStatusUntil(env, service, 20, []string{serviceStatusUrl}, targetVersion)
 }
 
 
 func pollServiceStatusUntil(env string, service string, targetVersion string) {
-	state := getWarpState()
-
-	serviceStatusUrls := []string{
-		// FIXME support private prefix also
-		fmt.Sprintf(
-			"%s-lb.%s/by/service/%s/status",
-			env,
-			state.warpSettings.LbDomain,
-			service,
-		),
+	if !IsExposed(env, service) {
+		// the service is not externally exposed
+		return
 	}
 
-    pollLbStatusUntil(env, service, 20, serviceStatusUrls, targetVersion)
+	domain := getDomain()
+	hiddenPrefix := getHiddenPrefix(env)
+
+	var serviceStatusUrl string
+	if hiddenPrefix == "" {
+		serviceStatusUrl = fmt.Sprintf(
+			"%s-%s.%s/status",
+			env,
+			service,
+			domain,
+		)
+	} else {
+		serviceStatusUrl = fmt.Sprintf(
+			"%s-%s.%s/%s/status",
+			env,
+			service,
+			domain,
+			hiddenPrefix,
+		)
+	}
+
+    pollStatusUntil(env, service, 20, []string{serviceStatusUrl}, targetVersion)
 }
-
-
-func listBlocks(env string, service string) []string {
-	// FIXME parse the site definition and returns the blocks in order listed for the service
-	return []string{}
-}
-
 
 
 func convertVersionToDocker(version string) string {

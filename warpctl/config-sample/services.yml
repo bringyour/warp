@@ -28,9 +28,10 @@ versions:
     services_docker_network: warpservices
     lb:
         ports:
-            # <externalport> -> <port> forces an external port
-            - 80 -> 80
-            - 443 -> 443
+            - 80
+            - 443
+        # udp_ports:
+        #     - 8000
         interfaces:
             # each <host>-<interface> is a block
             by-us-fmt-1-edge-0.bringyour.com:
@@ -38,21 +39,27 @@ versions:
                     docker_network: warpen0
                     concurrent_clients: 753664
                     cores: 92
+                    external_ports:
+                        # <externalport>: <port> forces an external port
+                        80: 80
+                        443: 443
     services:
         web:
             # expose these hostnames as aliases for the service.
             # The aliases must be covered by the same tls cert as the domain
             # expose_aliases:
             #     - bringyour.com
-            # if false, no entry is created for <env>-<service>.<domain>
+            # (default true) if false, no entry is created for <env>-<service>.<domain>
             # exposed: false
-            # if false, no route is created for <env>-lb.<domain>
+            # (default true) if false, no route is created for <env>-lb.<domain>
             # lb_exposed: true
             # if no hosts list, all lb hosts are used
             # hosts:
             #   - by-us-fmt-1-edge-0.bringyour.com
             ports:
                 - 80
+            # udp_ports:
+            #     - 8000
             blocks:
                 - beta: 1
                 - g1: 24

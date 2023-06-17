@@ -227,13 +227,6 @@ func initWarp(opts docopt.Opts) {
             state.warpSettings.KeysHome = &keysHome
         }
     }
-    if lbDomain, err := opts.String("--lbdomain"); err == nil {
-        if lbDomain == "" {
-            state.warpSettings.LbDomain = nil
-        } else {
-            state.warpSettings.LbDomain = &lbDomain
-        }
-    }
     
     setWarpState(state)
 }
@@ -530,10 +523,13 @@ func deploy(opts docopt.Opts) {
     }
 
     // poll the load balancer for the specific blocks until the versions stabilize
-    pollBlockStatusUntil(env, service, deployBlocks, deployVersion)
+    pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion)
 
     if reflect.DeepEqual(blocks, deployBlocks) {
         // poll the load balancer for all blocks until the version stabilizes
+        pollLbServiceStatusUntil(env, service, deployVersion)
+
+        // finally poll the exported domain for the service
         pollServiceStatusUntil(env, service, deployVersion)
     }
 
@@ -752,9 +748,10 @@ func lbCreateConfig(opts docopt.Opts) {
     // FIXME read the site meta data
     fmt.Printf("nginx config\n")
 
+    // FIXME
     // FIXME lb.go
-    nginxConfig := NewNginxConfig(env)
-    blockConfigs := nginxConfig.generate()
+    // nginxConfig := NewNginxConfig(env)
+    // blockConfigs := nginxConfig.generate()
 
     // if one block, print the config for that block without a header
     // if more than one block, add a header before each block

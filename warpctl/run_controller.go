@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"io"
 	"encoding/json"
-	"regexp"
 
 
 	"github.com/coreos/go-semver/semver"
@@ -26,6 +25,14 @@ import (
 // FOR NON-SERVICE NETWORKS DISABLE MASQ
 // docker network create --attachable --opt 'com.docker.network.bridge.name=warp1' --opt 'com.docker.network.bridge.enable_ip_masquerade=false' warp1 
 // docker network create --attachable --opt 'com.docker.network.bridge.name=warpsservices' warpsservices
+
+
+
+// FIXME
+// FIXME at run pass these in as env vars
+// WARP_ENV
+// WARP_VERSION
+// WARP_CONFIG_VERSION
 
 
 
@@ -325,7 +332,8 @@ func (self *RunWorker) startContainer(dockerInternalPortsToInternalPort map[int]
 
 	vaultMount := "/srv/warp/vault"
 	keysMount := "/srv/warp/keys"
-	localMount := "/srv/warp/keys"
+	// FIXME
+	// siteMount := "/srv/warp/keys"
 
 	containerName := fmt.Sprintf(
 		"%s-%s-%s-%s-%d",
@@ -570,8 +578,6 @@ func parsePortBlocks(portBlocksStr string) *PortBlocks {
 	externalsToDockerInternal := map[int]int{}
 
 	externalStrs := strings.Split(portBlocksStr, ";")
-	portRangeRegex := regexp.MustCompile("^(\\d+)-(\\d+)$")
-	portRegex := regexp.MustCompile("^(\\d+)$")
 	for _, externalStr := range externalStrs {
 		externalStrSplit := strings.SplitN(externalStr, ":", 3)
 		externalPort, err := strconv.Atoi(externalStrSplit[0])
@@ -582,29 +588,9 @@ func parsePortBlocks(portBlocksStr string) *PortBlocks {
 		if err != nil {
 			panic(fmt.Sprintf("Port block must be int externalport:dockerport:portlist (%s)", externalStrSplit[0]))
 		}
-		internalPorts := []int{}
-		for _, portsStr := range strings.Split(externalStrSplit[2], ",") {
-			if portStrs := portRangeRegex.FindStringSubmatch(portsStr); portStrs != nil {
-				minPort, err := strconv.Atoi(portStrs[0])
-				if err != nil {
-					panic(err)
-				}
-				maxPort, err := strconv.Atoi(portStrs[1])
-				if err != nil {
-					panic(err)
-				}
-				for port := minPort; port <= maxPort; port += 1 {
-					internalPorts = append(internalPorts, port)
-				}
-			} else if portStrs := portRegex.FindStringSubmatch(portsStr); portStrs != nil {
-				port, err := strconv.Atoi(portStrs[0])
-				if err != nil {
-					panic(err)
-				}
-				internalPorts = append(internalPorts, port)
-			} else {
-				panic(fmt.Sprintf("Port must be either int min-max or port (%s)", portsStr))
-			}
+		internalPorts, err := expandPorts(externalStrSplit[2])
+		if err != nil {
+			panic(err)
 		}
 		externalsToInternals[externalPort] = internalPorts
 		externalsToDockerInternal[externalPort] = dockerInternalPort

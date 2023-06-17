@@ -9,4 +9,5 @@ require (
 	github.com/coreos/go-semver v0.3.1 // indirect
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1 // indirect
 	golang.org/x/sync v0.2.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -45,24 +45,38 @@ $WARP_HOME
 	config/
 	  local/ # this is the env name
 	    # add files that your services read to configure their behavior
+	  myfirstenv/
 	vault/
 	  local/
 	    services.yml
-	    # add files for service credentials and secret keys
-	    tls/
-	      star_mydomain_com/
-	        star_mydomain_com.pem
-	        star_mydomain_com.key
+	  myfirstenv/
+	   	services.yml
+      tls/
+        star_mydomain_com/
+          star_mydomain_com.pem
+          star_mydomain_com.key
 	site/
 	  # add files specific to this host
 ```
 
-Edit `vault/local/services.yml` to define your services.
+Edit `vault/local/services.yml` inside an env to define the services and hosts for that env.
 
 ```
 EXAMPLE
 ```
 
+
+# What is config?
+
+Config are like hard coded configuration that your services read. This can be anything that tunes the behavior of the services, including ml weights.
+
+Instead of creating new service versions to deploy new configurations, new config is injected into existing versions using the config-updater. This is like changing the command line args but for all the config files.
+
+
+
+# What is vault?
+
+This is where you put sensistive files that should never be in a docker repo. These are usually stored in some encrypoted way and set up on the target host in some secure way.
 
 
 
@@ -70,7 +84,7 @@ EXAMPLE
 
 ## Run locally
 
-The `local_lb` target of the makefile runs the lb locally and edit `/etc/hostnames` to correctly direct the service hostnames.
+The `local_lb` target of the warp makefile runs the lb locally and edit `/etc/hostnames` to correctly direct the service hostnames. The hostname your dev computer is also used as an alias so that you can create DNS entries for your dev computer for second-device/mobile testing. 
 
 ```
 make local_lb
@@ -79,21 +93,24 @@ make local_lb
 Use `warpctl runlocal` to run each service locally.
 
 ```
-warpctl runlocal api/Makefile
+warpctl runlocal /path/to/your/service/Makefile
 ```
 
 
-# Set up an environment
+# Set up a deployment environment
 
-Create systemctl units for all your services.
+You create a deployment environment where you want services to run. Each environment needs a host and a network interface. Each network interface runs its own lb. For example if you have three interfaces, you can have three public IPs and run three lbs. The lb is meant to receive traffic directly from the internet without a NAT so that the source IPs are preserved.
+
+Create systemd units for all your services.
 
 ```
-warpctl service create-units <env> <outdir>
+warpctl service create-units <env> <outdir> --targetwarphome=/srv/warp
 ```
 
-The units are organized by host. Install,
+The units are organized by host.
 
-On the target host, create the target warp home
+
+On the target server host, create the target warp home.
 
 ```
 /srv/warp
@@ -102,7 +119,25 @@ On the target host, create the target warp home
   site
 ```
 
-Set up the vault manually or using a tool like Ansible. Config is deployed using the `config-updater` service. Local is for settings specific to this host, whcih can be done manually or with a tool like Ansible. For example this can be settings with routes to services that are site specific.
+Configure vault and site outside of warp (e.g. ansible or some secure system image tool). We will deploy the config as the final step.
+
+Copy warpctl the host at /usr/local/bin.
+
+```
+export WARP_HOME=/srv/warp
+warpctl init XXX
+```
+
+Now copy the systemd units into place (/etc/system/system.d/) and enable all the units.
+
+As your first deployment, deploy the config-updater from your dev computer.
+
+```
+warpctl stage version next
+warpctl build config-updater/<Makefile>
+warpctl deploy XXX
+```
+
 
 
 ## Build and deploy
@@ -122,7 +157,7 @@ warpctl deployXXX
 
 
 
-## Services
+## Service requirements
 
 Every service needs a makefile that builds and publishes a docker image. The makefile should use these env vars:
 

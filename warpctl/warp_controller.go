@@ -43,6 +43,39 @@ type WarpSettings struct {
     KeysHome *string `json:"keysHome,omitempty"`
 }
 
+func (self *WarpSettings) RequireDockerNamespace() string {
+	if self.DockerNamespace == nil {
+		panic("WARP_DOCKER_NAMESPACE is not set. Use warpctl init.")
+	}
+	return *self.DockerNamespace
+}
+func (self *WarpSettings) RequireDockerHubUsername() string {
+	if self.DockerHubUsername == nil {
+		panic("WARP_DOCKER_HUB_USERNAME is not set. Use warpctl init.")
+	}
+	return *self.DockerHubUsername
+}
+func (self *WarpSettings) RequireDockerHubToken() string {
+	if self.DockerHubToken == nil {
+		panic("WARP_DOCKER_HUB_TOKEN is not set. Use warpctl init.")
+	}
+	return *self.DockerHubToken
+}
+func (self *WarpSettings) RequireVaultHome() string {
+	if self.VaultHome == nil {
+		panic("WARP_VAULT_HOME is not set. Use warpctl init.")
+	}
+	return *self.VaultHome
+}
+func (self *WarpSettings) RequireKeysHome() string {
+	if self.KeysHome == nil {
+		panic("WARP_KEYS_HOME is not set. Use warpctl init.")
+	}
+	return *self.KeysHome
+}
+
+
+
 
 type VersionSettings struct {
     StagedVersion *string `json:"stagedVersion,omitempty"`
@@ -444,7 +477,7 @@ func getVersionMeta(env string, service string) *VersionMeta {
 
 func pollStatusUntil(env string, service string, sampleCount int, statusUrls []string, targetVersion string) {
 	for {
-        statusVersions := sampleLbStatusVersions(20, statusUrls)
+        statusVersions := sampleStatusVersions(20, statusUrls)
 
         serviceCount := 0
         serviceVersions := []*semver.Version{}
@@ -587,19 +620,19 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 		    	}
 			}
 
-			var statusResponse WarpStatusResponse
+			var warpStatusResponse WarpStatusResponse
 			body, err := io.ReadAll(statusResponse.Body)
 		    if err != nil {
 		    	panic(err)
 		    }
-	    	err = json.Unmarshal(body, &statusResponse)
+	    	err = json.Unmarshal(body, &warpStatusResponse)
 	    	if err != nil {
 	    		return &WarpStatusResponse{
 		    		Status: fmt.Sprintf("error could not parse status"),
 		    	}
 	    	}
 
-			return &statusResponse
+			return &warpStatusResponse
 	    }
 
 		for i := 0; i < sampleCount; i += 1 {
@@ -625,7 +658,7 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 
 
 func pollLbBlockStatusUntil(env string, service string, blocks []string, targetVersion string) {
-	if !IsLbExposed(env, service) {
+	if !isLbExposed(env, service) {
 		// the service is not externally exposed
 		return
 	}
@@ -662,12 +695,12 @@ func pollLbBlockStatusUntil(env string, service string, blocks []string, targetV
 
 
 func pollLbServiceStatusUntil(env string, service string, targetVersion string) {
-	if !IsLbExposed(env, service) {
+	if !isLbExposed(env, service) {
 		// the service is not externally exposed
 		return
 	}
 
-	domain := getDomain()
+	domain := getDomain(env)
 	hiddenPrefix := getLbHiddenPrefix(env)
 
 	var serviceStatusUrl string
@@ -693,12 +726,12 @@ func pollLbServiceStatusUntil(env string, service string, targetVersion string) 
 
 
 func pollServiceStatusUntil(env string, service string, targetVersion string) {
-	if !IsExposed(env, service) {
+	if !isExposed(env, service) {
 		// the service is not externally exposed
 		return
 	}
 
-	domain := getDomain()
+	domain := getDomain(env)
 	hiddenPrefix := getHiddenPrefix(env)
 
 	var serviceStatusUrl string

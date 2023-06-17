@@ -1,7 +1,18 @@
 package main
 
 import (
+	"os"
+	"fmt"
+	"path/filepath"
+	"errors"
+	"strings"
+	"sort"
+
+	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
+
+	"gopkg.in/yaml.v3"
+	"github.com/coreos/go-semver/semver"
 )
 
 
@@ -10,22 +21,36 @@ type ServicesConfig struct {
 	CorsHost string
 	HiddenPrefixes []string
 	LbHiddenPrefixes []string
-	versions []*ServiceConfigVersion
+	Versions []*ServicesConfigVersion
 
 
 }
 
 
+func (self *ServicesConfig) getHiddenPrefix() string {
+	if 0 < len(self.HiddenPrefixes) {
+		return self.HiddenPrefixes[0]
+	}
+	return ""
+}
 
-func (self *ServicesConfig) services() map[string]*ServiceConfig {
-	return self.versions[0].Services
+
+func (self *ServicesConfig) getLbHiddenPrefix() string {
+	if 0 < len(self.LbHiddenPrefixes) {
+		return self.LbHiddenPrefixes[0]
+	}
+	if 0 < len(self.HiddenPrefixes) {
+		return self.HiddenPrefixes[0]
+	}
+	return ""
 }
 
 
 
-type ServiceConfigVersion struct {
-	ExternalPorts string
-	InternalPorts string
+
+type ServicesConfigVersion struct {
+	ExternalPorts any
+	InternalPorts any
 	ParallelBlockCount int
 	ServicesDockerNetwork string
 
@@ -33,32 +58,64 @@ type ServiceConfigVersion struct {
 	Services map[string]*ServiceConfig
 }
 
+
+type PortConfig struct {
+	Ports []int
+	UdpPorts []int
+}
+
+func (self *PortConfig) AllPorts() map[string][]int {
+	return map[string][]int {
+		"tcp": self.Ports,
+		"udp": self.UdpPorts,
+	}
+}
+
+
 type LbConfig struct {
-	Ports []string
-	Interfaces map[string]map[string]*LbBlockInfo
+	Interfaces map[string]map[string]*LbBlock
+	PortConfig
 }
 
 
 type ServiceConfig struct {
 	ExposeAliases []string
-	Exposed bool
-	LbExposed bool
+	Exposed *bool
+	LbExposed *bool
 	Hosts []string
-	Ports string
 	Blocks []map[string]int
+	PortConfig
 }
 
-func (self *ServiceConfig) IncludesHost(host string) bool {
+func (self *ServiceConfig) isExposed() bool {
+	// default true
+	return self.Exposed == nil || *self.Exposed
+}
+
+func (self *ServiceConfig) isLbExposed() bool {
+	return self.LbExposed == nil || *self.LbExposed
+}
+
+
+func (self *ServiceConfig) includesHost(host string) bool {
 	return len(self.Hosts) == 0 || slices.Contains(self.Hosts, host)
 }
 
 
 
-type LbBlockInfo struct {
+
+type LbBlock struct {
 	DockerNetwork string
 	ConcurrentClients int
 	Cores int
+	ExternalPorts map[int]int
 }
+
+
+
+
+
+
 
 
 
@@ -67,7 +124,394 @@ type LbBlockInfo struct {
 // load from the vaulthome
 func getServicesConfig(env string) *ServicesConfig {
 
+	state := getWarpState()
+
+	servicesConfigPath := filepath.Join(
+		state.warpSettings.RequireVaultHome(),
+		env,
+		"services.yml",
+	)
+	data, err := os.ReadFile(servicesConfigPath)
+	if err != nil {
+		panic(err)
+	}
+
+	var servicesConfig ServicesConfig
+	err = yaml.Unmarshal(data, &servicesConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	// add a default config-updater if not defined
+	if _, ok := servicesConfig.Versions[0].Services["config-updater"]; !ok {
+		exposed := false
+		lbExposed := false
+		servicesConfig.Versions[0].Services["config-updater"] = &ServiceConfig{
+			Exposed: &exposed,
+			LbExposed: &lbExposed,
+			Blocks: []map[string]int{
+				map[string]int{"main":1},
+			},
+		}
+	}
+
+	return &servicesConfig
 }
+
+
+
+
+
+
+// union lb and service blocks
+type BlockInfo struct {
+	service string
+	block string
+	weight int
+
+	host string
+	interfaceName string
+	lbBlock *LbBlock
+}
+
+
+
+// service -> blockinfo
+func getBlockInfos(env string) map[string]map[string]*BlockInfo {
+	servicesConfig := getServicesConfig(env)
+
+	blockInfos := map[string]map[string]*BlockInfo{}
+	
+	lbBlockInfos := map[string]*BlockInfo{}
+	for host, lbBlocks := range servicesConfig.Versions[0].Lb.Interfaces {
+		for interfaceName, lbBlock := range lbBlocks {
+			block := fmt.Sprintf("%s-%s", host, interfaceName)
+			blockInfo := &BlockInfo{
+				service: "lb",
+				block: block,
+				host: host,
+				interfaceName: interfaceName,
+				lbBlock: lbBlock,
+			}
+			lbBlockInfos[block] = blockInfo
+		}
+	}
+	blockInfos["lb"] = lbBlockInfos
+
+	for service, serviceConfig := range servicesConfig.Versions[0].Services {
+		serviceBlockInfos := map[string]*BlockInfo{}
+		for _, blockWeights := range serviceConfig.Blocks {
+			blocks := maps.Keys(blockWeights)
+			sort.Strings(blocks)
+			for _, block := range blocks {
+				weight := blockWeights[block]
+				blockInfo := &BlockInfo {
+					service: service,
+					block: block,
+					weight: weight,
+				}
+				serviceBlockInfos[block] = blockInfo
+			}
+		}
+		blockInfos[service] = serviceBlockInfos
+	}
+
+	return blockInfos
+}
+
+func getBlocks(env string, service string) []string {
+	blockInfos := getBlockInfos(env)
+	blocks := []string{}
+	for block, _ := range blockInfos[service] {
+		blocks = append(blocks, block)
+	}
+	return blocks
+}
+
+
+
+
+type PortBlock struct {
+	service string
+	block string
+	port int
+	externalPort int
+	externalPortType string
+	internalPorts []int
+}
+
+func (self *PortBlock) eq(service string, block string, port int) bool {
+	return self.service == service && self.block == block && self.port == port
+}
+
+
+// service -> block -> port -> block
+// port block is external port:service port:internal port range
+func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
+	/*
+	# RULES:
+# 1. Once an internal port is associated to a service-block, it can never be associated to another service-block.
+# 2. Each service-block-<serviceport> has a fixed external port that will never change.
+#    If the port is removed from the exteral ports list, that is a config error.
+*/
+
+	servicesConfig := getServicesConfig(env)
+
+
+	portBlocks := map[string]map[string]map[int]*PortBlock{}
+	assignedExternalPorts := map[int]*PortBlock{}
+	assignedInternalPorts := map[int]*PortBlock{}
+
+
+	assignPortBlock := func(service string, block string, port int)(*PortBlock) {
+		portBlock, ok := portBlocks[service][block][port]
+		if ok {
+			return portBlock
+		}
+		portBlock = &PortBlock{
+			service: service,
+			block: block,
+			port: port,
+		}
+		portBlocks[service][block][port] = portBlock
+		return portBlock
+	}
+
+	assignExternalPort := func(
+		service string,
+		block string,
+		port int,
+		externalPorts []int,
+		force map[int]int,
+		externalPortType string,
+	) {
+		portBlock := assignPortBlock(service, block, port)
+		
+		p := func()(int) {
+			if p, ok := force[port]; ok {
+				return p
+			}
+
+			// find an already assigned port
+			for _, p := range externalPorts {
+				if assignedPortBlock, ok := assignedExternalPorts[p]; ok {
+					if assignedPortBlock.eq(service, block, port) {
+						return p
+					}
+				}
+			}
+
+			// find a free port
+			for _, p := range externalPorts {
+				if _, ok := assignedExternalPorts[p]; !ok {
+					return p
+				}
+			}
+
+			panic("No more external ports to assign. Increase the external port range.")
+		}()
+
+		if portBlock.externalPort != 0 && portBlock.externalPort != p {
+			panic("The external port of a port block cannot change.")
+		}
+		if portBlock.externalPortType != "" && portBlock.externalPortType != externalPortType {
+			panic("The external port type of a port block cannot change.")
+		}
+
+		if assignedPortBlock, ok := assignedExternalPorts[p]; ok {
+			if !assignedPortBlock.eq(service, block, port) {
+				panic("Cannot overwrite the external port of another port block.")
+			}
+		}
+		assignedExternalPorts[p] = portBlock
+
+		portBlock.externalPort = p
+		portBlock.externalPortType = externalPortType
+	}
+	assignInternalPorts := func(
+		service string,
+		block string,
+		port int,
+		internalPorts []int,
+		count int,
+	) {
+		portBlock := assignPortBlock(service, block, port)
+		
+		ps := []int{}
+
+		// find already assigned ports
+		for _, p := range internalPorts {
+			if count <= len(ps) {
+				break
+			}
+			if assignedPortBlock, ok := assignedInternalPorts[p]; ok {
+				if assignedPortBlock.eq(service, block, port) {
+					ps = append(ps, p)
+				}
+			}
+		}
+
+		// find free ports
+		for _, p := range internalPorts {
+			if count <= len(ps) {
+				break
+			}
+			if _, ok := assignedInternalPorts[p]; !ok {
+				ps = append(ps, p)
+			}
+		}
+
+		if len(ps) < count {
+			panic("No more internal ports to assign. Increase the internal port range.")
+		}
+
+		for _, p := range ps {
+			if assignedPortBlock, ok := assignedInternalPorts[p]; ok {
+				if !assignedPortBlock.eq(service, block, port) {
+					panic("Cannot overwrite the internal port of another port block.")
+				}
+			}
+			assignedInternalPorts[p] = portBlock
+		}
+		portBlock.internalPorts = ps
+	}
+
+
+	// interate versions from last to first
+	for i := len(servicesConfig.Versions) - 1; 0 <= i; i -= 1 {
+		serviceConfigVersion := servicesConfig.Versions[i]
+		externalPorts, err := expandAnyPorts(serviceConfigVersion.ExternalPorts)
+		if err != nil {
+			panic(err)
+		}
+		internalPorts, err := expandAnyPorts(serviceConfigVersion.InternalPorts)
+		if err != nil {
+			panic(err)
+		}
+
+		lbConfig := serviceConfigVersion.Lb
+		// process forced external ports first
+		for _, includeForcedExternalPorts := range []bool{true, false} {
+			for host, lbBlocks := range lbConfig.Interfaces {
+				for interfaceName, lbBlock := range lbBlocks {
+					hasForcedExternalPorts := 0 < len(lbBlock.ExternalPorts)
+					if hasForcedExternalPorts != includeForcedExternalPorts {
+						continue
+					}
+
+					block := fmt.Sprintf("%s-%s", host, interfaceName)
+					for portType, ports := range lbConfig.AllPorts() {
+						for _, port := range ports {
+							assignExternalPort(
+								"lb",
+								block,
+								port,
+								externalPorts,
+								lbBlock.ExternalPorts,
+								portType,
+							)
+							assignInternalPorts(
+								"lb",
+								block,
+								port,
+								internalPorts,
+								serviceConfigVersion.ParallelBlockCount,
+							)
+						}
+					}
+				}
+			}
+		}
+
+		for service, serviceConfig := range serviceConfigVersion.Services {
+			for _, blockWeights := range serviceConfig.Blocks {
+				for block, _ := range blockWeights {
+					for portType, ports := range lbConfig.AllPorts() {
+						for _, port := range ports {
+							assignExternalPort(
+								service,
+								block,
+								port,
+								externalPorts,
+								map[int]int{},
+								portType,
+							)
+							assignInternalPorts(
+								service,
+								block,
+								port,
+								internalPorts,
+								serviceConfigVersion.ParallelBlockCount,
+							)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return portBlocks
+}
+
+
+
+
+
+
+func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath string) {
+	state := getWarpState()
+	vaultHome := state.warpSettings.RequireVaultHome()
+
+	domainSuffix := strings.ReplaceAll(domain, ".", "_")
+
+	pemFileName := fmt.Sprintf("star_%s.pem", domainSuffix)
+	keyFileName := fmt.Sprintf("star_%s.key", domainSuffix)
+
+	hasTlsFiles := func(dirPath string)(bool) {
+		for _, fileName := range []string{pemFileName, keyFileName} {
+			if _, err := os.Stat(filepath.Join(dirPath, fileName)); errors.Is(err, os.ErrNotExist) {
+				return false
+			}
+		}
+		return true
+	}
+
+	entries, err := os.ReadDir(vaultHome)
+	if err != nil {
+		panic(err)
+	}
+	versionDirNames := map[*semver.Version]string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if version, err := semver.NewVersion(entry.Name()); err == nil {
+				if hasTlsFiles(filepath.Join(vaultHome, entry.Name())) {
+					versionDirNames[version] = entry.Name()
+				}
+			}
+		}
+	}
+
+	versions := maps.Keys(versionDirNames)
+	semver.Sort(versions)
+	if 0 < len(versions) {
+		version := versions[len(versionDirNames) - 1]
+		relativeTlsPemPath = filepath.Join(version.String(), pemFileName)
+		relativeTlsKeyPath = filepath.Join(version.String(), keyFileName)
+		return
+	}
+
+	// no version
+	if hasTlsFiles(vaultHome) {
+		relativeTlsPemPath = pemFileName
+		relativeTlsKeyPath = keyFileName
+		return
+	}
+
+	panic(fmt.Sprintf("TLS files %s and %s not found.", pemFileName, keyFileName))
+}
+
+
+
 
 
 func getDomain(env string) string {
@@ -83,18 +527,30 @@ func getHostnames(env string, envAliases []string) []string {
 	lbHost := fmt.Sprintf("%s-lb.%s", env, servicesConfig.Domain)
 	hosts = append(hosts, lbHost)
 
-	services := maps.Keys(self.serviceConfig.services)
-	strings.Sort(services)
-	
+	for _, envAlias := range envAliases {
+		lbHostAlias := fmt.Sprintf("%s-lb.%s", envAlias, servicesConfig.Domain)
+		hosts = append(hosts, lbHostAlias)
+	}	
+
+	serviceConfigs := servicesConfig.Versions[0].Services
+	services := maps.Keys(serviceConfigs)
+	sort.Strings(services)
+
 	for _, service := range services {
-		if !serviceConfig.services[service].Exposed {
+		serviceConfig := serviceConfigs[service]
+		if !serviceConfig.isExposed() {
 			continue
 		}
 
-		serviceHost := fmt.Sprintf("%s-%s.%s", env, service, domain)
+		serviceHost := fmt.Sprintf("%s-%s.%s", env, service, servicesConfig.Domain)
 		hosts = append(hosts, serviceHost)
 
-		for _, serviceHostAlias := range self.serviceConfig.services[service].ExposeAliases {
+		for _, envAlias := range envAliases {
+			serviceHostAlias := fmt.Sprintf("%s-%s.%s", envAlias, service, servicesConfig.Domain)
+			hosts = append(hosts, serviceHostAlias)
+		}
+
+		for _, serviceHostAlias := range serviceConfig.ExposeAliases {
 			hosts = append(hosts, serviceHostAlias)
 		}
 	}
@@ -103,88 +559,35 @@ func getHostnames(env string, envAliases []string) []string {
 }
 
 
-func getHiddenPrefix(env string) string {
+func isExposed(env string, service string) bool {
 	servicesConfig := getServicesConfig(env)
-	if 0 < len(servicesConfig.hiddenPrefixes) {
-		return servicesConfig.hiddenPrefixes[0]
+	serviceConfig, ok := servicesConfig.Versions[0].Services[service]
+	if !ok {
+		// doesn't exist
+		return false
 	}
-	return ""
+	return serviceConfig.isExposed()
 }
 
+func isLbExposed(env string, service string) bool {
+	servicesConfig := getServicesConfig(env)
+	serviceConfig, ok := servicesConfig.Versions[0].Services[service]
+	if !ok {
+		// doesn't exist
+		return false
+	}
+	return serviceConfig.isLbExposed()
+}
+
+func getHiddenPrefix(env string) string {
+	servicesConfig := getServicesConfig(env)
+	return servicesConfig.getHiddenPrefix()
+}
 
 func getLbHiddenPrefix(env string) string {
 	servicesConfig := getServicesConfig(env)
-	if 0 < len(servicesConfig.lbHiddenPrefixes) {
-		return servicesConfig.lbHiddenPrefixes[0]
-	}
-	if 0 < len(servicesConfig.hiddenPrefixes) {
-		return servicesConfig.hiddenPrefixes[0]
-	}
-	return ""
+	return servicesConfig.getLbHiddenPrefix()
 }
-
-
-func IsExposed(env string, service string) bool {
-	servicesConfig := getServicesConfig(env)
-	return servicesConfig.services[service].Exposed
-}
-
-
-func IsLbExposed(env string, service string) bool {
-	servicesConfig := getServicesConfig(env)
-	return servicesConfig.services[service].LbExposed
-}
-
-
-
-const (
-	BLOCK_TYPE_LB = "lb"
-	BLOCK_TYPE_SERVICE = "service"
-)
-
-
-// union lb and service blocks
-type BlockInfo struct {
-	blockType string
-	name string
-	weight int
-
-	host string
-	interfaceName string
-	lbBlockInfo *LbBlockInfo
-
-	serviceBlockInfo *ServiceBlockInfo
-}
-
-
-
-// service -> blockinfo
-func getBlockInfos(env string) map[string][]*BlockInfo {
-	// FIXME parse the site definition and returns the blocks in order listed for the service
-	return []string{}
-}
-
-func getBlocks(env string, service string) []string {
-	blockInfos := getBlockInfos(env)
-	blocks := maps.Keys(blockInfos[service])
-	return blocks
-}
-
-
-
-
-type PortBlock struct {
-
-}
-
-
-// service -> block -> port block
-// port block is external port:service port:internal port range
-func getPortBlocks(env string) map[string]map[string]*PortBlock {
-	
-}
-
-
 
 
 
@@ -195,7 +598,7 @@ type NginxConfig struct {
 	env string
 	envAliases []string
 	servicesConfig *ServicesConfig
-	portBlocks map[string]map[string]*PortBlock
+	portBlocks map[string]map[string]map[int]*PortBlock
 	blockInfos map[string]map[string]*BlockInfo
 	// services []string
 
@@ -209,25 +612,17 @@ type NginxConfig struct {
 }
 
 func NewNginxConfig(env string, envAliases []string) *NginxConfig {
-	state := getWarpState()
-
 	servicesConfig := getServicesConfig(env)
 
-	// resolve the wildcard tls
-	// <vault>/tls/<maxversion>/star_<domain>/star_<domain>.pem
-	// <vault>/tls/<maxversion>/star_<domain>/star_<domain>.key
-	// FIXME
-
-	// services := maps.Keys(self.serviceConfig.services)
-	// strings.Sort(services)
+	// note that all aliases must be covered by the same tls cert as the main domain
+	relativeTlsPemPath, relativeTlsKeyPath := findLatestTls(servicesConfig.Domain)
 
 	return &NginxConfig{
 		servicesConfig: servicesConfig,
 		portBlocks: getPortBlocks(env),
 		blockInfos: getBlockInfos(env),
-		services: services,
-		tlsPemPath: tlsPemPath,
-		tlsKeyPath: tlsKeyPath
+		relativeTlsPemPath: relativeTlsPemPath,
+		relativeTlsKeyPath: relativeTlsKeyPath,
 	}
 }
 
@@ -236,17 +631,17 @@ func (self *NginxConfig) services() []string {
 	// filter services based on which ones are exposed to the lbBlockInfo.host
 
 	services := []string{}
-	for service, serviceConfig := range self.servicesConfig.services() {
-		if serviceConfig.IncludesHost(self.lbBlockHost) {
+	for service, serviceConfig := range self.servicesConfig.Versions[0].Services {
+		if serviceConfig.includesHost(self.lbBlockInfo.host) {
 			services = append(services, service)
 		}
 	}
-	strings.Sort(services)
+	sort.Strings(services)
 	return services
 }
 
 
-func (self *NginxConfig) raw(text string, data map[string]interface{}...) {
+func (self *NginxConfig) raw(text string, data ...map[string]any) {
 	configPart := templateString(text, data...)
 	self.configParts = append(self.configParts, configPart)
 }
@@ -283,18 +678,23 @@ func (self *NginxConfig) addNginxConfig() {
 	include /etc/nginx/modules-enabled/*.conf;
 	`)
 
+	concurrentClients := self.lbBlockInfo.lbBlock.ConcurrentClients
+	cores := self.lbBlockInfo.lbBlock.Cores
+	// round up
+	workersPerCore := (concurrentClients + cores - 1) / cores
+
 	self.raw(`
-	# target concurrent users (from services.yml): {{.concurrentCount}}
+	# target concurrent users (from services.yml): {{.concurrentClients}}
 	# https://www.nginx.com/blog/tuning-nginx/
-	worker_processes {{.coreCount}};
+	worker_processes {{.cores}};
 	events {
 	    worker_connections {{.workersPerCore}};
 	    multi_accept on;
 	}
-	`, map[string]interface{}{
-		concurrentCount: concurrentCount,
-		coreCount: coreCount,
-		workersPerCore: workersPerCore,
+	`, map[string]any{
+		"concurrentClients": concurrentClients,
+		"cores": cores,
+		"workersPerCore": workersPerCore,
 	})
 
 	self.cblock("http", func(){
@@ -372,6 +772,10 @@ func (self *NginxConfig) addNginxConfig() {
 
 		self.addServiceBlocks()
 	})
+
+	// FIXME stream block
+	// FIXME for non-80 ports, for each service port, we would match the service port of the lb to the external ports
+	// 
 }
 
 
@@ -380,26 +784,25 @@ func (self *NginxConfig) addUpstreamBlocks() {
 	// service-block-<service>
 	// service-block-<service>-<block>
 	for _, service := range self.services() {
-		blocks := maps.Keys(portBlocks[service])
-		strings.Sort(blocks)
+		blocks := maps.Keys(self.portBlocks[service])
+		sort.Strings(blocks)
 
 		upstreamServers := []string{}
 		for _, block := range blocks {
-			portBlock, ok := portBlocks[service][block]
+			// only service port 80 is exposed via the html block
+			portBlock, ok := self.portBlocks[service][block][80]
 			if !ok {
-				panic()
+				// this service does not support http
+				continue
 			}
-			blockInfo, ok := blockInfos[service][block]
-			if !ok {
-				panic()
-			}
+			blockInfo := self.blockInfos[service][block]
 
 			upstreamServer := templateString("server {{.dockerNetwork}}:{{.externalPort}} weight={{.weight}};",
-				map[string]interface{}{
-					"dockerNetwork": servicesConfig.servicesDockerNetwork,
+				map[string]any{
+					"dockerNetwork": self.servicesConfig.Versions[0].ServicesDockerNetwork,
 					"externalPort": portBlock.externalPort,
 					"weight": blockInfo.weight,
-				}
+				},
 			)
 			upstreamServers = append(upstreamServers, upstreamServer)
 		}
@@ -413,15 +816,16 @@ func (self *NginxConfig) addUpstreamBlocks() {
 		    keepalive_time 30s;
 		    keepalive_timeout 30s;
 		}
-		`, map[string]interface{}{
+		`, map[string]any{
 			"service": service,
 			"upstreamServers": strings.Join(upstreamServers, "\n"),
 		})
 
 		for _, block := range blocks {
-			portBlock, ok := portBlocks[service][block]
+			portBlock, ok := self.portBlocks[service][block][80]
 			if !ok {
-				panic()
+				// this service does not support http
+				continue
 			}
 
 			self.raw(`
@@ -433,10 +837,10 @@ func (self *NginxConfig) addUpstreamBlocks() {
 			    keepalive_time 30s;
 			    keepalive_timeout 30s;
 			}
-			`, map[string]interface{}{
+			`, map[string]any{
 				"service": service,
 				"block": block,
-				"dockerNetwork": servicesConfig.servicesDockerNetwork,
+				"dockerNetwork": self.servicesConfig.Versions[0].ServicesDockerNetwork,
 				"externalPort": portBlock.externalPort,
 			})
 		}
@@ -447,7 +851,7 @@ func (self *NginxConfig) addUpstreamBlocks() {
 
 func (self *NginxConfig) addLbBlock() {
 	var rootPrefix string
-	lbHiddenPrefix = getLbHiddenPrefix(env)
+	lbHiddenPrefix := self.servicesConfig.getLbHiddenPrefix()
 	if lbHiddenPrefix == "" {
 		rootPrefix = ""
 	} else {
@@ -459,14 +863,14 @@ func (self *NginxConfig) addLbBlock() {
 	locations := []string{}
 
 	for _, service := range self.services() {
-		if !serviceConfig.services[service].LbExposed {
+		if !self.servicesConfig.Versions[0].Services[service].isLbExposed() {
 			continue
 		}
 
-		blocks := maps.Keys(portBlocks[service])
-		strings.Sort(blocks)
+		blocks := maps.Keys(self.portBlocks[service])
+		sort.Strings(blocks)
 
-		serviceHost := fmt.Sprintf("%s-%s.%s", self.env, service, domain)
+		serviceHost := fmt.Sprintf("%s-%s.%s", self.env, service, self.servicesConfig.Domain)
 
 		serviceLocation := templateString(`
 		location {{.rootPrefix}}/by/service/%s/ {
@@ -475,7 +879,7 @@ func (self *NginxConfig) addLbBlock() {
             proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header Host {{.serviceHost}};
         }
-		`, map[string]interface{}{
+		`, map[string]any{
 			"rootPrefix": rootPrefix,
 			"service": service,
 			"serviceHost": serviceHost,
@@ -490,8 +894,8 @@ func (self *NginxConfig) addLbBlock() {
 	            proxy_set_header X-Forwarded-For $remote_addr;
 	            proxy_set_header Host {{.serviceHost}};
 	        }
-			`, map[string]interface{}{
-				"rootPrefix", rootPrefix,
+			`, map[string]any{
+				"rootPrefix": rootPrefix,
 				"service": service,
 				"block": block,
 				"serviceHost": serviceHost,
@@ -502,11 +906,11 @@ func (self *NginxConfig) addLbBlock() {
 
 	lbHosts := []string{}
 
-	lbHost := fmt.Sprintf("%s-lb.%s", self.env, domain)
+	lbHost := fmt.Sprintf("%s-lb.%s", self.env, self.servicesConfig.Domain)
 	lbHosts = append(lbHosts, lbHost)
 
-	for _, env := self.envAliases {
-		lbHostAlias := fmt.Sprintf("%s-lb.%s", env, domain)
+	for _, env := range self.envAliases {
+		lbHostAlias := fmt.Sprintf("%s-lb.%s", env, self.servicesConfig.Domain)
 		lbHosts = append(lbHosts, lbHostAlias)
 	}
 
@@ -524,7 +928,7 @@ func (self *NginxConfig) addLbBlock() {
 
         {{.locations}}
     }
-	`, map[string]interface{}{
+	`, map[string]any{
 		"lbHostList": strings.Join(lbHosts, " "),
 		"relativeTlsPemPath": self.relativeTlsPemPath,
 		"relativeTlsKeyPath": self.relativeTlsKeyPath,
@@ -534,7 +938,7 @@ func (self *NginxConfig) addLbBlock() {
 
 func (self *NginxConfig) addServiceBlocks() {
 	var rootPrefix string
-	hiddenPrefix := getHiddenPrefix(env)
+	hiddenPrefix := self.servicesConfig.getHiddenPrefix()
 	if hiddenPrefix == "" {
 		rootPrefix = ""
 	} else {
@@ -542,21 +946,21 @@ func (self *NginxConfig) addServiceBlocks() {
 	}
 
 	for _, service := range self.services() {
-		if !serviceConfig.services[service].Exposed {
+		if !self.servicesConfig.Versions[0].Services[service].isExposed() {
 			continue
 		}
 
 		serviceHosts := []string{}
 
-		serviceHost := fmt.Sprintf("%s-%s.%s", self.env, service, domain)
+		serviceHost := fmt.Sprintf("%s-%s.%s", self.env, service, self.servicesConfig.Domain)
 		serviceHosts = append(serviceHosts, serviceHost)
 
 		for _, env := range self.envAliases {
-			serviceHostAlias := fmt.Sprintf("%s-%s.%s", env, service, domain)
+			serviceHostAlias := fmt.Sprintf("%s-%s.%s", env, service, self.servicesConfig.Domain)
 			serviceHosts = append(serviceHosts, serviceHostAlias)
 		}
 
-		for _, serviceHostAlias := range self.serviceConfig.services[service].ExposeAliases {
+		for _, serviceHostAlias := range self.servicesConfig.Versions[0].Services[service].ExposeAliases {
 			serviceHosts = append(serviceHosts, serviceHostAlias)
 		}
 
@@ -607,14 +1011,23 @@ func (self *NginxConfig) addServiceBlocks() {
 	             }
 	        }
 	    }
-		`, map[string]interface{}{
+		`, map[string]any{
 			"serviceHostList": strings.Join(serviceHosts, " "),
 			"relativeTlsPemPath": self.relativeTlsPemPath,
 			"relativeTlsKeyPath": self.relativeTlsKeyPath,
 			"rootPrefix": rootPrefix,
-			"service", service,
-			"corsHost", self.servicesConfig.corsHost,
+			"service": service,
+			"corsHost": self.servicesConfig.CorsHost,
 		})
 	}
 }
+
+
+
+
+
+// FIXME create systemd units
+
+
+
 

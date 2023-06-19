@@ -112,8 +112,8 @@ Usage:
     warpctl lb create-config <env> [<block>] [--envalias=<envalias>]
     warpctl run-local <Makefile> [--envalias=<envalias>]
     warpctl service run <env> <service> <block>
-        --portblocks=<portblocks>
         [--rttable=<rttable> --dockernet=<dockernet>]
+        [--portblocks=<portblocks>]
         --services_dockernet=<services_dockernet>
         [--mount_vault=<mount_vault_mode>]
         [--mount_config=<mount_config_mode>]
@@ -867,12 +867,11 @@ func serviceRun(opts docopt.Opts) {
         panic(err)
     }
 
-    portBlocksStr, err := opts.String("--portblocks")
-    if err != nil {
-        panic(err)
+    var portBlocks *PortBlocks
+    if portBlocksStr, err := opts.String("--portblocks"); err == nil {
+        portBlocks = parsePortBlocks(portBlocksStr)
     }
-    portBlocks := parsePortBlocks(portBlocksStr)
-
+    
     servicesDockerNetStr, err := opts.String("--services_dockernet")
     if err != nil {
         panic(err)
@@ -960,8 +959,29 @@ func serviceCreateUnit(opts docopt.Opts) {
 }
 
 
+// FIXME run should set common env vars
+// WARP_HOME
+// WARP_ENV
+// WARP_VERSION
+// WARP_CONFIG_VERSION
+// WARP_SERVICE
+// WARP_BLOCK
 func createUnits(opts docopt.Opts) {
-    // FIXME unit.go
+
+    env, err := opts.String("<env>")
+    if err != nil {
+        panic(err)
+    }
+    
+    systemdUnits := NewSystemdUnits(env, "/srv/warp", "/usr/local/bin/warpctl")
+    servicesUnits := systemdUnits.generate()
+
+    for service, serviceUnits := range servicesUnits {
+        for block, unit := range serviceUnits {
+            fmt.Printf("#\n# %s-%s block %s\n#\n\n%s\n\n", env, service, block, unit)
+        }
+    }
+
 }
 
 

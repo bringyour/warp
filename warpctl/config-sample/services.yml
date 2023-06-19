@@ -22,8 +22,10 @@ versions:
 # 1. Once an internal port is associated to a service-block, it can never be associated to another service-block.
 # 2. Each service-block-<serviceport> has a fixed external port that will never change.
 #    If the port is removed from the exteral ports list, that is a config error.
+# 3. An lb-block has a fixed routing table that will never change 
 -   external_ports: 80,443,7000-7200
     internal_ports: 7201-9000
+    routing_tables: 100-120
     parallel_block_count: 30
     services_docker_network: warpservices
     lb:

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"strconv"
 	"fmt"
+	"sort"
 	"regexp"
 )
 
@@ -89,7 +90,69 @@ func expandPorts(portsListStr string) ([]int, error) {
 }
 
 
-// func collapsePorts([]int ports) string {
-// 	// FIXME
-// }
+func collapsePorts(ports []int) string {
+	parts := []string{}
+
+	sort.Ints(ports)
+	for i := 0; i < len(ports); {
+		j := i + 1
+		for j < len(ports) && ports[j] == ports[j - 1] + 1 {
+			j += 1
+		}
+		if i == j - 1 {
+			parts = append(parts, fmt.Sprintf("%d", ports[i]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", ports[i], ports[j - 1]))
+		}
+		i = j
+	}
+
+	return strings.Join(parts, ",")
+}
+
+
+
+func indentAndTrimString(text string, indent int) string {
+	// use the minimum indent of a contentful line
+
+	contentfulLineRegex := regexp.MustCompile("^(\\s*)\\S")
+	minIndent := -1
+
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if contentfulLineStrs := contentfulLineRegex.FindStringSubmatch(line); contentfulLineStrs != nil {
+			lineIndent := len(contentfulLineStrs[1])
+			if minIndent < 0 || lineIndent < minIndent{
+				minIndent = lineIndent
+			}
+		}
+	}
+
+	if minIndent < 0 {
+		minIndent = 0
+	}
+
+	indentStr := strings.Repeat(" ", indent)
+
+
+	indentedLines := []string{}
+	for i, line := range lines {
+		if len(line) <= minIndent {
+			// trim first and least empty lines
+			if 0 < i && i < len(lines) - 1 {
+				indentedLine := ""
+				indentedLines = append(indentedLines, indentedLine)
+			}
+		} else {
+			indentedLine := fmt.Sprintf("%s%s", indentStr, line[minIndent:])
+			indentedLines = append(indentedLines, indentedLine)
+		}
+		
+	}
+
+
+
+	return strings.Join(indentedLines, "\n")
+}
+
 

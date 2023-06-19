@@ -90,7 +90,7 @@ Usage:
         [--dockerhub_username=<dockerhub_username>]
         [--dockerhub_token=<dockerhub_token>]
         [--vault_home=<vault_home>]
-        [--keys_home=<keys_home>]
+        [--config_home=<config_home>]
         [--site_home=<site_home>]
     warpctl stage version (local | sync | next (beta | release) --message=<message>)
     warpctl build <env> <Makefile>
@@ -100,20 +100,23 @@ Usage:
     warpctl deploy-local <env> <service> [--percent=<percent>]
     warpctl deploy-beta <env> <service> [--percent=<percent>]
     warpctl deploy-release <env> <service> [--percent=<percent>]
+    warpctl watch <env> <service>
+        [--target_version=<target_version>]
+        (<blocklist> | --percent=<percent>)
     warpctl ls version [-b] [-d]
     warpctl ls services [<env>]
     warpctl ls service-blocks [<env> [<service>]]
     warpctl ls versions [<env> [<service>]]
     warpctl lb list-blocks <env>
-    warpctl lb list-hostnames <env>
-    warpctl lb create-configs <env> [<block>] [--envalias=<envalias>]
-    warpctl runlocal <Makefile> [--envalias=<envalias>]
+    warpctl lb list-hosts <env>
+    warpctl lb create-config <env> [<block>] [--envalias=<envalias>]
+    warpctl run-local <Makefile> [--envalias=<envalias>]
     warpctl service run <env> <service> <block>
         --portblocks=<portblocks>
         [--rttable=<rttable> --dockernet=<dockernet>]
         --services_dockernet=<services_dockernet>
         [--mount_vault=<mount_vault_mode>]
-        [--mount_keys=<mount_keys_mode>]
+        [--mount_config=<mount_config_mode>]
         [--mount_site=<mount_site_mode>]
     warpctl service create-unit <env> <service> <block>
         [--target_warp_home=<target_warp_home>]
@@ -126,8 +129,9 @@ Options:
     --docker_namespace=<docker_namespace>      Your docker namespace. Docker repos are namespace/env-service.
     --dockerhub_username=<dockerhub_username>  Your dockerhub username.
     --dockerhub_token=<dockerhub_token>        Your dockerhub token.
-    --vault_home=<vault_home>  Secure vault home (keys-red). For local usage, the services.yml will live at <vault_home>/<env>/services.yml
-    --keys_home=<keys_home>    Keys home.
+    --vault_home=<vault_home>  Secure vault home. On your dev host, the services.yml will live at <vault_home>/<env>/services.yml
+    --config_home=<config_home>    Config home.
+    --site_home=<site_home>        Site home. These are files that exist only on this host
     --message=<message>        Version stage message.
     --percent=<percent>        Deploy to a percent of blocks, ordered lexicographically with beta first.
                                The block count is rounded up to the nearest int. 
@@ -138,7 +142,8 @@ Options:
     --dockernet=<dockernet>
     --services_dockernet=<services_dockernet>  
     --mount_vault=<mount_vault_mode>           One of: no, yes 
-    --mount_keys=<mount_keys_mode>             One of: no, yes, root. Root mode allows the keys to be written, e.g. the keys-updater
+    --mount_config=<mount_config_mode>         One of: no, yes, root. Root mode allows the config to be written, e.g. the config-updater
+    --mount_site=<mount_site_mode>             One of: no, yes
     --target_warp_home=<target_warp_home>      WARP_HOME for the unit.
     --outdir=<outdir>          Output dir.`
 
@@ -174,7 +179,11 @@ Options:
             lsVersions(opts)
         }
     } else if lb, _ := opts.Bool("lb"); lb {
-        if createConfig, _ := opts.Bool("create-config"); createConfig {
+        if listBlocks, _ := opts.Bool("list-blocks"); listBlocks {
+            lbListBlocks(opts)
+        } else if listHosts, _ := opts.Bool("list-hosts"); listHosts {
+            lbListHosts(opts)
+        } else if createConfig, _ := opts.Bool("create-config"); createConfig {
             lbCreateConfig(opts)
         }
     } else if service, _ := opts.Bool("service"); service {
@@ -220,11 +229,18 @@ func initWarp(opts docopt.Opts) {
             state.warpSettings.VaultHome = &vaultHome
         }
     }
-    if keysHome, err := opts.String("--keys_home"); err == nil {
-        if keysHome == "" {
-            state.warpSettings.KeysHome = nil
+    if configHome, err := opts.String("--config_home"); err == nil {
+        if configHome == "" {
+            state.warpSettings.ConfigHome = nil
         } else {
-            state.warpSettings.KeysHome = &keysHome
+            state.warpSettings.ConfigHome = &configHome
+        }
+    }
+    if siteHome, err := opts.String("--site_home"); err == nil {
+        if siteHome == "" {
+            state.warpSettings.SiteHome = nil
+        } else {
+            state.warpSettings.SiteHome = &siteHome
         }
     }
     
@@ -351,24 +367,15 @@ func build(opts docopt.Opts) {
 
     state := getWarpState()
 
-    if state.warpSettings.VaultHome == nil {
-        panic("WARP_VAULT_HOME is not set. Use warpctl init.")
-    }
-    if state.warpSettings.KeysHome == nil {
-        panic("WARP_KEYS_HOME is not set. Use warpctl init.")
-    }
-    if state.warpSettings.DockerNamespace == nil {
-        panic("WARP_NAMESPACE is not set. Use warpctl init.")
-    }
-
     env, _ := opts.String("<env>")
 
     version := getVersion(true, true)
 
     envVars := map[string]string{
-        "WARP_VAULT_HOME": *state.warpSettings.VaultHome,
-        "WARP_KEYS_HOME": *state.warpSettings.KeysHome,
-        "WARP_NAMESPACE": *state.warpSettings.DockerNamespace,
+        "WARP_VAULT_HOME": state.warpSettings.RequireVaultHome(),
+        "WARP_CONFIG_HOME": state.warpSettings.RequireConfigHome(),
+        "WARP_SITE_HOME": state.warpSettings.RequireSiteHome(),
+        "WARP_DOCKER_NAMESPACE": state.warpSettings.RequireDockerNamespace(),
         "WARP_VERSION": version,
         "WARP_ENV": env,
     }
@@ -744,6 +751,44 @@ func lsVersions(opts docopt.Opts) {
     }
 }
 
+
+func lbListBlocks(opts docopt.Opts) {
+
+    env, err := opts.String("<env>")
+    if err != nil {
+        panic(err)
+    }
+
+    blockInfos := getBlockInfos(env)
+
+    lbBlockInfos := blockInfos["lb"]
+    blocks := maps.Keys(lbBlockInfos)
+    sort.Strings(blocks)
+    for _, block := range blocks {
+        fmt.Printf("%s\n", block)
+    }
+}
+
+
+func lbListHosts(opts docopt.Opts) {
+    env, err := opts.String("<env>")
+    if err != nil {
+        panic(err)
+    }
+
+    blockInfos := getBlockInfos(env)
+
+    hosts := []string{}
+    for _, blockInfo := range blockInfos["lb"] {
+        hosts = append(hosts, blockInfo.host)
+    }
+    sort.Strings(hosts)
+    for _, host := range hosts {
+        fmt.Printf("%s\n", host)
+    }
+}
+
+
 func lbCreateConfig(opts docopt.Opts) {
     // FIXME read the site meta data
     fmt.Printf("nginx config\n")
@@ -755,6 +800,52 @@ func lbCreateConfig(opts docopt.Opts) {
 
     // if one block, print the config for that block without a header
     // if more than one block, add a header before each block
+
+
+    env, err := opts.String("<env>")
+    if err != nil {
+        panic(err)
+    }
+
+    envAliases := []string{}
+    if envAlias, err := opts.String("--envalias"); err == nil {
+        envAliases = append(envAliases, envAlias)
+    }
+
+    includeBlocks := []string{}
+    if block, err := opts.String("<block>"); err == nil {
+        includeBlocks = append(includeBlocks, block)
+    }
+
+
+
+
+
+
+    nginxConfig := NewNginxConfig(env, envAliases)
+    blockConfigs := nginxConfig.generate()
+
+    if len(includeBlocks) == 0 {
+        for block, config := range blockConfigs {
+            fmt.Printf("#\n# %s\n#\n\n%s", block, config)
+        }
+    } else if len(includeBlocks) == 1 {
+        block := includeBlocks[0]
+        config, ok := blockConfigs[block]
+        if !ok {
+            panic(fmt.Sprintf("Block \"%s\" not found", block))
+        }
+        fmt.Printf("%s", config)
+    } else {
+        for _, block := range includeBlocks {
+            config, ok := blockConfigs[block]
+            if !ok {
+                panic(fmt.Sprintf("Block \"%s\" not found", block))
+            }
+            fmt.Printf("#\n# %s\n#\n\n%s", block, config)
+        }
+    }
+
 }
 
 
@@ -806,7 +897,8 @@ func serviceRun(opts docopt.Opts) {
     }
 
     var vaultMountMode string
-    var keysMountMode string
+    var configMountMode string
+    var siteMountMode string
 
     if mode, err := opts.String("--mount_vault"); err == nil {
         switch mode {
@@ -819,15 +911,26 @@ func serviceRun(opts docopt.Opts) {
         vaultMountMode = MOUNT_MODE_YES
     }
 
-    if mode, err := opts.String("--mount_keys"); err == nil {
+    if mode, err := opts.String("--mount_config"); err == nil {
         switch mode {
         case MOUNT_MODE_YES, MOUNT_MODE_NO, MOUNT_MODE_ROOT:
-            keysMountMode = mode
+            configMountMode = mode
         default:
-            panic(errors.New(fmt.Sprintf("Keys mount mode must be one of: %s, %s, %s", MOUNT_MODE_YES, MOUNT_MODE_NO, MOUNT_MODE_ROOT)))
+            panic(errors.New(fmt.Sprintf("Config mount mode must be one of: %s, %s, %s", MOUNT_MODE_YES, MOUNT_MODE_NO, MOUNT_MODE_ROOT)))
         }
     } else {
-        keysMountMode = MOUNT_MODE_YES
+        configMountMode = MOUNT_MODE_YES
+    }
+
+    if mode, err := opts.String("--mount_site"); err == nil {
+        switch mode {
+        case MOUNT_MODE_YES, MOUNT_MODE_NO:
+            siteMountMode = mode
+        default:
+            panic(errors.New(fmt.Sprintf("Site mount mode must be one of: %s, %s, %s", MOUNT_MODE_YES, MOUNT_MODE_NO, MOUNT_MODE_ROOT)))
+        }
+    } else {
+        siteMountMode = MOUNT_MODE_YES
     }
 
     quit := make(chan os.Signal, 1)
@@ -842,7 +945,8 @@ func serviceRun(opts docopt.Opts) {
         routingTable: routingTable,
         dockerNetwork: dockerNetwork,
         vaultMountMode: vaultMountMode,
-        keysMountMode: keysMountMode,
+        configMountMode: configMountMode,
+        siteMountMode: siteMountMode,
         quit: quit,
     }
     runWorker.run()

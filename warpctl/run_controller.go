@@ -53,13 +53,12 @@ type RunWorker struct {
 	dockerNetwork *DockerNetwork
 
 	vaultMountMode string
-	keysMountMode string
+	configMountMode string
+	siteMountMode string
 
 	deployedVersion *semver.Version
-	deployedKeysVersion *semver.Version
+	deployedConfigVersion *semver.Version
 
-	// fixme vault bind mode
-	// fixme keys bind mode
 	quit chan os.Signal
 }
 
@@ -75,22 +74,22 @@ func (self *RunWorker) run() {
 	self.initBlockRedirect()
 
 	self.deployedVersion = nil
-	self.deployedKeysVersion = nil
+	self.deployedConfigVersion = nil
 
 	// watch for new versions until killed
 	watcher:
 	for {
-		latestVersion, latestKeysVersion := self.getLatestVersion()
+		latestVersion, latestConfigVersion := self.getLatestVersion()
 		if self.deployedVersion != latestVersion || 
-				self.keysMountMode == MOUNT_MODE_YES && self.deployedKeysVersion != latestKeysVersion {
+				self.configMountMode == MOUNT_MODE_YES && self.deployedConfigVersion != latestConfigVersion {
 			// deploy new version
 			self.deployedVersion = latestVersion
-			self.deployedKeysVersion = latestKeysVersion
+			self.deployedConfigVersion = latestConfigVersion
 
 			if self.deployedVersion == nil {
 				announceRunWaitForVersion()
-			} else if self.deployedKeysVersion == nil && self.keysMountMode == MOUNT_MODE_YES {
-				announceRunWaitForKeys()
+			} else if self.deployedConfigVersion == nil && self.configMountMode == MOUNT_MODE_YES {
+				announceRunWaitForConfig()
 			} else {
 				func() {
 					announceRunStart()
@@ -118,7 +117,7 @@ func (self *RunWorker) run() {
 }
 
 
-// service version, keys version
+// service version, config version
 func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
 
 	state := getWarpState()
@@ -126,34 +125,34 @@ func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
 	versionMeta := getVersionMeta(self.env, self.service)
 	latestVersion := versionMeta.latestBlocks[self.block]
 
-	var latestKeysVersion *semver.Version
-	if state.warpSettings.KeysHome == nil {
-		latestKeysVersion = nil
+	var latestConfigVersion *semver.Version
+	if state.warpSettings.ConfigHome == nil {
+		latestConfigVersion = nil
 	} else {
-		entries, err := os.ReadDir(*state.warpSettings.KeysHome)
+		entries, err := os.ReadDir(*state.warpSettings.ConfigHome)
 	    if err != nil {
 	    	panic(err)
 	    }
 
-	    keysVersions := []*semver.Version{}
+	    configVersions := []*semver.Version{}
 	    for _, entry := range entries {
 	    	if entry.IsDir() {
 	    		if version, err := semver.NewVersion(entry.Name()); err == nil {
-	    			keysVersions = append(keysVersions, version)
+	    			configVersions = append(configVersions, version)
 	    		}
 	    	}
 	    }
-	    semver.Sort(keysVersions)
+	    semver.Sort(configVersions)
 
 	    
-	    if len(keysVersions) == 0 {
-	    	latestKeysVersion = nil
+	    if len(configVersions) == 0 {
+	    	latestConfigVersion = nil
 	    } else {
-	    	latestKeysVersion = keysVersions[len(keysVersions) - 1]
+	    	latestConfigVersion = configVersions[len(configVersions) - 1]
 	    }
 	}
 
-    return latestVersion, latestKeysVersion
+    return latestVersion, latestConfigVersion
 }
 
 
@@ -249,9 +248,9 @@ func (self *RunWorker) initBlockRedirect() {
 
 
 func (self *RunWorker) deploy() error {
-	externalsPortsToInternalPort, dockerInternalPortsToInternalPort := self.findDeployPorts()
+	externalsPortsToInternalPort, servicePortsToInternalPort := self.findDeployPorts()
 
-    deployedContainerId, err := self.startContainer(dockerInternalPortsToInternalPort)
+    deployedContainerId, err := self.startContainer(servicePortsToInternalPort)
     if err != nil {
     	return err
     }
@@ -262,7 +261,7 @@ func (self *RunWorker) deploy() error {
 	    }
     }()
 
-	if err := self.pollContainerStatus(dockerInternalPortsToInternalPort, 300 * time.Second); err != nil {
+	if err := self.pollContainerStatus(servicePortsToInternalPort, 300 * time.Second); err != nil {
 		return err
 	}
 
@@ -271,7 +270,7 @@ func (self *RunWorker) deploy() error {
 		return err
 	}
 	// verify the internal ports
-	for _, internalPort := range dockerInternalPortsToInternalPort {
+	for _, internalPort := range servicePortsToInternalPort {
 		if containerId, ok := runningContainers[internalPort]; !ok || deployedContainerId != containerId {
 			return errors.New(fmt.Sprintf("Container is not listening on internal port %d", internalPort))
 		}
@@ -317,23 +316,22 @@ func (self *RunWorker) findDeployPorts() (map[int]int, map[int]int) {
 			}
 		}
 
-		dockerInternalPortsToInternalPort := map[int]int{}
-		for externalPort, dockerInternalPort := range self.portBlocks.externalsToDockerInternal {
+		servicePortsToInternalPort := map[int]int{}
+		for externalPort, servicePort := range self.portBlocks.externalsToService {
 			internalPort := externalsPortsToInternalPort[externalPort]
-			dockerInternalPortsToInternalPort[dockerInternalPort] = internalPort
+			servicePortsToInternalPort[servicePort] = internalPort
 		}
 
-		return externalsPortsToInternalPort, dockerInternalPortsToInternalPort
+		return externalsPortsToInternalPort, servicePortsToInternalPort
 	}
 }
 
-func (self *RunWorker) startContainer(dockerInternalPortsToInternalPort map[int]int) (string, error) {
+func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (string, error) {
 	state := getWarpState()
 
 	vaultMount := "/srv/warp/vault"
-	keysMount := "/srv/warp/keys"
-	// FIXME
-	// siteMount := "/srv/warp/keys"
+	configMount := "/srv/warp/config"
+	siteMount := "/srv/warp/site"
 
 	containerName := fmt.Sprintf(
 		"%s-%s-%s-%s-%d",
@@ -357,8 +355,8 @@ func (self *RunWorker) startContainer(dockerInternalPortsToInternalPort map[int]
 		"-d",
 		"--restart=on-failure",
 	}...)
-	for dockerInternalPort, internalPort := range dockerInternalPortsToInternalPort {
-		args = append(args, []string{"-p", fmt.Sprintf("%d:%d", internalPort, dockerInternalPort)}...)
+	for servicePort, internalPort := range servicePortsToInternalPort {
+		args = append(args, []string{"-p", fmt.Sprintf("%d:%d", internalPort, servicePort)}...)
 	}
 	if self.dockerNetwork != nil {
 		args = append(args, []string{"--network", self.dockerNetwork.networkName}...)
@@ -372,33 +370,51 @@ func (self *RunWorker) startContainer(dockerInternalPortsToInternalPort map[int]
 
 	switch self.vaultMountMode {
 	case MOUNT_MODE_YES:
-		if state.warpSettings.VaultHome == nil {
-			return "", errors.New("Missing warp vault home")
-		}
 		args = append(args, []string{
 			"--mount",
-			fmt.Sprintf("type=bind,source=%s,target=%s,readonly", *state.warpSettings.VaultHome, vaultMount),
+			fmt.Sprintf(
+				"type=bind,source=%s,target=%s,readonly",
+				state.warpSettings.RequireVaultHome(),
+				vaultMount,
+			),
 		}...)
 	}
 
-	switch self.keysMountMode {
+	switch self.configMountMode {
 	case MOUNT_MODE_YES:
-		if state.warpSettings.KeysHome == nil {
-			return "", errors.New("Missing warp keys home")
-		}
-		keysVersionHome := path.Join(*state.warpSettings.KeysHome, self.deployedKeysVersion.String())
+		configVersionHome := path.Join(
+			state.warpSettings.RequireConfigHome(),
+			self.deployedConfigVersion.String(),
+		)
 		args = append(args, []string{
 			"--mount",
-			fmt.Sprintf("type=bind,source=%s,target=%s,readonly", keysVersionHome, keysMount),
+			fmt.Sprintf(
+				"type=bind,source=%s,target=%s,readonly",
+				configVersionHome,
+				configMount,
+			),
 		}...)
 	case MOUNT_MODE_ROOT:
-		if state.warpSettings.KeysHome == nil {
-			return "", errors.New("Missing warp keys home")
-		}
 		// mount as read-write (default)
 		args = append(args, []string{
 			"--mount",
-			fmt.Sprintf("type=bind,source=%s,target=%s", *state.warpSettings.KeysHome, keysMount),
+			fmt.Sprintf(
+				"type=bind,source=%s,target=%s",
+				state.warpSettings.RequireConfigHome(),
+				configMount,
+			),
+		}...)
+	}
+
+	switch self.siteMountMode {
+	case MOUNT_MODE_YES:
+		args = append(args, []string{
+			"--mount",
+			fmt.Sprintf(
+				"type=bind,source=%s,target=%s,readonly",
+				state.warpSettings.RequireSiteHome(),
+				siteMount,
+			),
 		}...)
 	}
 
@@ -414,8 +430,8 @@ func (self *RunWorker) startContainer(dockerInternalPortsToInternalPort map[int]
 	return container_id, nil
 }
 
-func (self *RunWorker) pollContainerStatus(dockerInternalPortsToInternalPort map[int]int, timeout time.Duration) error {
-	httpPort, ok := dockerInternalPortsToInternalPort[80]
+func (self *RunWorker) pollContainerStatus(servicePortsToInternalPort map[int]int, timeout time.Duration) error {
+	httpPort, ok := servicePortsToInternalPort[80]
 	if !ok {
 		// no http port - assume ok
 		return nil
@@ -568,36 +584,37 @@ func (self *RunWorker) findRunningContainers() (map[int]string, error) {
 
 type PortBlocks struct {
 	externalsToInternals map[int][]int
-	externalsToDockerInternal map[int]int
+	externalsToService map[int]int
 }
 
 
-// external:dockerInternal:p-P,p;external:dockerInternal:...
+// service:external::p-P,p;service:external:...
 func parsePortBlocks(portBlocksStr string) *PortBlocks {
 	externalsToInternals := map[int][]int{}
-	externalsToDockerInternal := map[int]int{}
+	externalsToService := map[int]int{}
 
 	externalStrs := strings.Split(portBlocksStr, ";")
 	for _, externalStr := range externalStrs {
 		externalStrSplit := strings.SplitN(externalStr, ":", 3)
-		externalPort, err := strconv.Atoi(externalStrSplit[0])
+		servicePort, err := strconv.Atoi(externalStrSplit[0])
 		if err != nil {
-			panic(fmt.Sprintf("Port block must be int externalport:dockerport:portlist (%s)", externalStrSplit[0]))
+			panic(fmt.Sprintf("Port block must be int serviceport:externalport:portlist (%s)", externalStrSplit[0]))
 		}
-		dockerInternalPort, err := strconv.Atoi(externalStrSplit[1])
+		externalPort, err := strconv.Atoi(externalStrSplit[1])
 		if err != nil {
-			panic(fmt.Sprintf("Port block must be int externalport:dockerport:portlist (%s)", externalStrSplit[0]))
+			panic(fmt.Sprintf("Port block must be int serviceport:externalport:portlist (%s)", externalStrSplit[0]))
 		}
+		
 		internalPorts, err := expandPorts(externalStrSplit[2])
 		if err != nil {
 			panic(err)
 		}
 		externalsToInternals[externalPort] = internalPorts
-		externalsToDockerInternal[externalPort] = dockerInternalPort
+		externalsToService[externalPort] = servicePort
 	}
 	return &PortBlocks{
 		externalsToInternals: externalsToInternals,
-		externalsToDockerInternal: externalsToDockerInternal,
+		externalsToService: externalsToService,
 	}
 }
 

@@ -17,13 +17,11 @@ import (
 
 
 type ServicesConfig struct {
-	Domain string
-	CorsHost string
-	HiddenPrefixes []string
-	LbHiddenPrefixes []string
-	Versions []*ServicesConfigVersion
-
-
+	Domain string `yaml:"domain,omitempty"`
+	CorsHost string `yaml:"core_host,omitempty"`
+	HiddenPrefixes []string `yaml:"hidden_prefixes,omitempty"`
+	LbHiddenPrefixes []string `yaml:"lb_hidden_prefixes,omitempty"`
+	Versions []*ServicesConfigVersion `yaml:"versions,omitempty"`
 }
 
 
@@ -49,19 +47,19 @@ func (self *ServicesConfig) getLbHiddenPrefix() string {
 
 
 type ServicesConfigVersion struct {
-	ExternalPorts any
-	InternalPorts any
-	ParallelBlockCount int
-	ServicesDockerNetwork string
+	ExternalPorts any `yaml:"external_ports,omitempty"`
+	InternalPorts any `yaml:"internal_ports,omitempty"`
+	ParallelBlockCount int `yaml:"parallel_block_count,omitempty"`
+	ServicesDockerNetwork string `yaml:"services_docker_network,omitempty"`
 
-	Lb *LbConfig
-	Services map[string]*ServiceConfig
+	Lb *LbConfig `yaml:"lb,omitempty"`
+	Services map[string]*ServiceConfig `yaml:"services,omitempty"`
 }
 
 
 type PortConfig struct {
-	Ports []int
-	UdpPorts []int
+	Ports []int `yaml:"ports,omitempty"`
+	UdpPorts []int `yaml:"udp_ports,omitempty"`
 }
 
 func (self *PortConfig) AllPorts() map[string][]int {
@@ -73,17 +71,17 @@ func (self *PortConfig) AllPorts() map[string][]int {
 
 
 type LbConfig struct {
-	Interfaces map[string]map[string]*LbBlock
+	Interfaces map[string]map[string]*LbBlock `yaml:"interfaces,omitempty"`
 	PortConfig
 }
 
 
 type ServiceConfig struct {
-	ExposeAliases []string
-	Exposed *bool
-	LbExposed *bool
-	Hosts []string
-	Blocks []map[string]int
+	ExposeAliases []string `yaml:"expose_aliases,omitempty"`
+	Exposed *bool `yaml:"exposed,omitempty"`
+	LbExposed *bool `yaml:"lb_exposed,omitempty"`
+	Hosts []string `yaml:"hosts,omitempty"`
+	Blocks []map[string]int `yaml:"blocks,omitempty"`
 	PortConfig
 }
 
@@ -105,10 +103,10 @@ func (self *ServiceConfig) includesHost(host string) bool {
 
 
 type LbBlock struct {
-	DockerNetwork string
-	ConcurrentClients int
-	Cores int
-	ExternalPorts map[int]int
+	DockerNetwork string `yaml:"docker_network,omitempty"`
+	ConcurrentClients int `yaml:"concurrent_clients,omitempty"`
+	Cores int `yaml:"cores,omitempty"`
+	ExternalPorts map[int]int `yaml:"external_ports,omitempty"`
 }
 
 
@@ -458,57 +456,6 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
 
 
 
-func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath string) {
-	state := getWarpState()
-	vaultHome := state.warpSettings.RequireVaultHome()
-
-	domainSuffix := strings.ReplaceAll(domain, ".", "_")
-
-	pemFileName := fmt.Sprintf("star_%s.pem", domainSuffix)
-	keyFileName := fmt.Sprintf("star_%s.key", domainSuffix)
-
-	hasTlsFiles := func(dirPath string)(bool) {
-		for _, fileName := range []string{pemFileName, keyFileName} {
-			if _, err := os.Stat(filepath.Join(dirPath, fileName)); errors.Is(err, os.ErrNotExist) {
-				return false
-			}
-		}
-		return true
-	}
-
-	entries, err := os.ReadDir(vaultHome)
-	if err != nil {
-		panic(err)
-	}
-	versionDirNames := map[*semver.Version]string{}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			if version, err := semver.NewVersion(entry.Name()); err == nil {
-				if hasTlsFiles(filepath.Join(vaultHome, entry.Name())) {
-					versionDirNames[version] = entry.Name()
-				}
-			}
-		}
-	}
-
-	versions := maps.Keys(versionDirNames)
-	semver.Sort(versions)
-	if 0 < len(versions) {
-		version := versions[len(versionDirNames) - 1]
-		relativeTlsPemPath = filepath.Join(version.String(), pemFileName)
-		relativeTlsKeyPath = filepath.Join(version.String(), keyFileName)
-		return
-	}
-
-	// no version
-	if hasTlsFiles(vaultHome) {
-		relativeTlsPemPath = pemFileName
-		relativeTlsKeyPath = keyFileName
-		return
-	}
-
-	panic(fmt.Sprintf("TLS files %s and %s not found.", pemFileName, keyFileName))
-}
 
 
 
@@ -618,12 +565,71 @@ func NewNginxConfig(env string, envAliases []string) *NginxConfig {
 	relativeTlsPemPath, relativeTlsKeyPath := findLatestTls(servicesConfig.Domain)
 
 	return &NginxConfig{
+		env: env,
+		envAliases: envAliases,
 		servicesConfig: servicesConfig,
 		portBlocks: getPortBlocks(env),
 		blockInfos: getBlockInfos(env),
 		relativeTlsPemPath: relativeTlsPemPath,
 		relativeTlsKeyPath: relativeTlsKeyPath,
 	}
+}
+
+
+func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath string) {
+	state := getWarpState()
+	vaultHome := state.warpSettings.RequireVaultHome()
+	tlsHome := filepath.Join(vaultHome, "tls")
+
+	domainSuffix := strings.ReplaceAll(domain, ".", "_")
+
+	keyDirName := fmt.Sprintf("star_%s", domainSuffix)
+	pemFileName := fmt.Sprintf("star_%s.pem", domainSuffix)
+	keyFileName := fmt.Sprintf("star_%s.key", domainSuffix)
+
+	hasTlsFiles := func(dirPath string)(bool) {
+		fmt.Printf("TLS SEARCHING %s\n", dirPath)
+		for _, fileName := range []string{pemFileName, keyFileName} {
+			if _, err := os.Stat(filepath.Join(dirPath, keyDirName, fileName)); errors.Is(err, os.ErrNotExist) {
+				return false
+			}
+		}
+		return true
+	}
+
+	entries, err := os.ReadDir(tlsHome)
+	if err != nil {
+		panic(err)
+	}
+	versionDirNames := map[*semver.Version]string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if version, err := semver.NewVersion(entry.Name()); err == nil {
+				if hasTlsFiles(filepath.Join(tlsHome, entry.Name())) {
+					versionDirNames[version] = entry.Name()
+				}
+			}
+		}
+	}
+
+	versions := maps.Keys(versionDirNames)
+	semver.Sort(versions)
+	if 0 < len(versions) {
+		version := versions[len(versions) - 1]
+		versionDirName := versionDirNames[version]
+		relativeTlsPemPath = filepath.Join(versionDirName, pemFileName)
+		relativeTlsKeyPath = filepath.Join(versionDirName, keyFileName)
+		return
+	}
+
+	// no version
+	if hasTlsFiles(tlsHome) {
+		relativeTlsPemPath = pemFileName
+		relativeTlsKeyPath = keyFileName
+		return
+	}
+
+	panic(fmt.Sprintf("TLS files %s and %s not found.", pemFileName, keyFileName))
 }
 
 
@@ -659,6 +665,7 @@ func (self *NginxConfig) generate() map[string]string {
 	blockConfigs := map[string]string{}
 
 	for block, blockInfo := range self.blockInfos["lb"] {
+		fmt.Printf("GENERATING FOR BLOCK %s\n", block)
 		self.configParts = []string{}
 		self.lbBlockInfo = blockInfo
 		self.addNginxConfig()
@@ -873,7 +880,7 @@ func (self *NginxConfig) addLbBlock() {
 		serviceHost := fmt.Sprintf("%s-%s.%s", self.env, service, self.servicesConfig.Domain)
 
 		serviceLocation := templateString(`
-		location {{.rootPrefix}}/by/service/%s/ {
+		location {{.rootPrefix}}/by/service/{{.service}}/ {
             limit_req zone=standardlimit burst=50 delay=25;
             proxy_pass http://service-block-{{.service}}/;
             proxy_set_header X-Forwarded-For $remote_addr;
@@ -926,7 +933,7 @@ func (self *NginxConfig) addLbBlock() {
         ssl_certificate     /srv/warp/vault/{{.relativeTlsPemPath}};
         ssl_certificate_key /srv/warp/vault/{{.relativeTlsKeyPath}};
 
-        {{.locations}}
+    {{.locations}}
     }
 	`, map[string]any{
 		"lbHostList": strings.Join(lbHosts, " "),

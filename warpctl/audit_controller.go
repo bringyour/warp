@@ -21,7 +21,7 @@ func announceRunWaitForVersion() {
 
 }
 
-func announceRunWaitForKeys() {
+func announceRunWaitForConfig() {
 
 }
 

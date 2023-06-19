@@ -40,7 +40,8 @@ type WarpSettings struct {
     DockerHubUsername *string `json:"dockerHubUsername,omitempty"`
     DockerHubToken *string `json:"dockerHubToken,omitempty"`
     VaultHome *string `json:"vaultHome,omitempty"`
-    KeysHome *string `json:"keysHome,omitempty"`
+    ConfigHome *string `json:"configHome,omitempty"`
+    SiteHome *string `json:"siteHome,omitempty"`
 }
 
 func (self *WarpSettings) RequireDockerNamespace() string {
@@ -67,11 +68,17 @@ func (self *WarpSettings) RequireVaultHome() string {
 	}
 	return *self.VaultHome
 }
-func (self *WarpSettings) RequireKeysHome() string {
-	if self.KeysHome == nil {
-		panic("WARP_KEYS_HOME is not set. Use warpctl init.")
+func (self *WarpSettings) RequireConfigHome() string {
+	if self.ConfigHome == nil {
+		panic("WARP_CONFIG_HOME is not set. Use warpctl init.")
 	}
-	return *self.KeysHome
+	return *self.ConfigHome
+}
+func (self *WarpSettings) RequireSiteHome() string {
+	if self.ConfigHome == nil {
+		panic("WARP_SITE_HOME is not set. Use warpctl init.")
+	}
+	return *self.SiteHome
 }
 
 
@@ -481,20 +488,20 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
 
         serviceCount := 0
         serviceVersions := []*semver.Version{}
-        keysCount := 0
-        keysVersions := []*semver.Version{}
+        configCount := 0
+        configVersions := []*semver.Version{}
 
         for version, count := range statusVersions.versions {
             serviceVersions = append(serviceVersions, version)
             serviceCount += count
         }
-        for version, count := range statusVersions.keysVersions {
-            keysVersions = append(keysVersions, version)
-            keysCount += count
+        for version, count := range statusVersions.configVersions {
+            configVersions = append(configVersions, version)
+            configCount += count
         }
 
         semver.Sort(serviceVersions)
-        semver.Sort(keysVersions)
+        semver.Sort(configVersions)
 
         if 0 < len(statusVersions.errors) {
             fmt.Printf("** errors **:\n")
@@ -510,10 +517,10 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
             fmt.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
-        fmt.Printf("keys versions:\n")
-        for _, version := range keysVersions {
-            count := statusVersions.keysVersions[version]
-            percent := 100.0 * count / keysCount
+        fmt.Printf("config versions:\n")
+        for _, version := range configVersions {
+            count := statusVersions.configVersions[version]
+            percent := 100.0 * count / configCount
             fmt.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
@@ -535,14 +542,14 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
 
 type StatusVersions struct {
 	versions map[*semver.Version]int
-	keysVersions map[*semver.Version]int
+	configVersions map[*semver.Version]int
 	errors map[string]int
 }
 
 
 type WarpStatusResponse struct {
 	Version string `json:"version"`
-	KeysVersion string `json:"keysVersion"`
+	ConfigVersion string `json:"configVersion"`
 	Status string `json:"status"`
 }
 
@@ -558,7 +565,7 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 
 	resultsMutex := sync.Mutex{}
 	versions := map[*semver.Version]int{}
-	keysVersions := map[*semver.Version]int{}
+	configVersions := map[*semver.Version]int{}
 	errors := map[string]int{}
 
 	addResults := func(statusResponse *WarpStatusResponse) {
@@ -572,11 +579,11 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 			errors["error status bad version"] += 1
 		}
 
-		keysVersion, err := semver.NewVersion(statusResponse.KeysVersion)
+		configVersion, err := semver.NewVersion(statusResponse.ConfigVersion)
 		if err == nil {
-			keysVersions[keysVersion] += 1
+			configVersions[configVersion] += 1
 		} else {
-			errors["error status bad keys version"] += 1
+			errors["error status bad config version"] += 1
 		}
 
 		if statusResponse.IsError() {
@@ -651,7 +658,7 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 
 	return &StatusVersions{
 		versions: versions,
-		keysVersions: keysVersions,
+		configVersions: configVersions,
 		errors: errors,
 	}
 }

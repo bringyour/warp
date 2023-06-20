@@ -95,7 +95,7 @@ Usage:
     warpctl stage version (local | sync | next (beta | release) --message=<message>)
     warpctl build <env> <Makefile>
     warpctl deploy <env> <service>
-        (<version> | latest-local | latest-beta | latest)
+        (latest-local | latest-beta | latest | <version>)
         (<blocklist> | --percent=<percent>)
     warpctl deploy-local <env> <service> [--percent=<percent>]
     warpctl deploy-beta <env> <service> [--percent=<percent>]
@@ -402,19 +402,26 @@ func build(opts docopt.Opts) {
 
 
 func deploy(opts docopt.Opts) {
-    state := getWarpState()
-
     env, _ := opts.String("<env>")
     service, _ := opts.String("<service>")
 
+    state := getWarpState()
+    dockerHubClient := NewDockerHubClient(state)
+
     var deployVersion string
 
-    if version, err := opts.String("<service>"); err == nil {
+    if version, err := opts.String("<version>"); err == nil {
         deployVersion = version
     } else {
-        serviceMeta := getServiceMeta()
-        versionMeta := serviceMeta.envVersionMetas[env][service]
+        serviceMeta := dockerHubClient.getServiceMeta()
+        fmt.Printf("SERVICE META %s\n", serviceMeta)
+        versionMeta, ok := serviceMeta.envVersionMetas[env][service]
+        if !ok {
+            panic("Env service not found in repo.")
+        }
         versions := versionMeta.versions
+
+        fmt.Printf("FOUND VERSIONS %s\n", versions)
 
         filteredVersions := []*semver.Version{}
 
@@ -488,43 +495,36 @@ func deploy(opts docopt.Opts) {
         // remove tag <block>-latest from current image
         // tag target image with <block>-latest
 
-        sourceImageName := fmt.Sprintf(
-            "%s/%s-%s:%s",
-            state.warpSettings.DockerNamespace,
+        imageName := fmt.Sprintf(
+            "%s/%s-%s",
+            state.warpSettings.RequireDockerNamespace(),
             env,
             service,
+        )
+
+        sourceImageName := fmt.Sprintf(
+            "%s:%s",
+            imageName,
             convertVersionToDocker(deployVersion),
         )
         deployImageName := fmt.Sprintf(
-            "%s/%s-%s:%s-latest",
-            state.warpSettings.DockerNamespace,
-            env,
-            service,
+            "%s:%s-latest",
+            imageName,
             block,
         )
 
-        var err error
+        cmds := NewCommandList()
+        cmds.dir = state.warpVersionHome
 
-        dockerRmiCommand := exec.Command("docker", "rmi", deployImageName)
-        dockerRmiCommand.Dir = state.warpVersionHome
-        err = dockerRmiCommand.Run()
-        if err != nil {
-            panic(err)
-        }
+        cmds.docker("pull", sourceImageName)
+        cmds.docker("pull", deployImageName).ignoreErrors()
+        cmds.docker("rmi", deployImageName).ignoreErrors()
+        // fmt.Sprintf("%s-latest", block)
+        cmds.docker("buildx", "imagetools", "create", "-t", deployImageName, sourceImageName)
+        // cmds.docker("tag", sourceImageName, deployImageName)
+        // cmds.docker("push", deployImageName)
 
-        dockerTagCommand := exec.Command("docker", "tag", sourceImageName, deployImageName)
-        dockerTagCommand.Dir = state.warpVersionHome
-        err = dockerTagCommand.Run()
-        if err != nil {
-            panic(err)
-        }
-
-        dockerPushCommand := exec.Command("docker", "push", deployImageName)
-        dockerPushCommand.Dir = state.warpVersionHome
-        err = dockerPushCommand.Run()
-        if err != nil {
-            panic(err)
-        }
+        cmds.run()
 
         fmt.Printf("Deployed %s -> %s\n", sourceImageName, deployImageName)
     }
@@ -568,12 +568,16 @@ func lsVersion(opts docopt.Opts) {
 
 
 func lsServices(opts docopt.Opts) {
+
     filterEnv, filterEnvErr := opts.String("<env>")
     includeEnv := func(env string) bool {
         return filterEnvErr != nil || filterEnv == env
     }
 
-    serviceMeta := getServiceMeta()
+    state := getWarpState()
+    dockerHubClient := NewDockerHubClient(state)
+
+    serviceMeta := dockerHubClient.getServiceMeta()
 
     sort.Strings(serviceMeta.envs)
     sort.Strings(serviceMeta.services)
@@ -638,7 +642,10 @@ func lsServiceBlocks(opts docopt.Opts) {
         return filterServiceErr != nil || filterService == service
     }
 
-    serviceMeta := getServiceMeta()
+    state := getWarpState()
+    dockerHubClient := NewDockerHubClient(state)
+
+    serviceMeta := dockerHubClient.getServiceMeta()
 
     sort.Strings(serviceMeta.envs)
     sort.Strings(serviceMeta.services)
@@ -675,7 +682,10 @@ func lsVersions(opts docopt.Opts) {
         return filterServiceErr != nil || filterService == service
     }
 
-    serviceMeta := getServiceMeta()
+    state := getWarpState()
+    dockerHubClient := NewDockerHubClient(state)
+
+    serviceMeta := dockerHubClient.getServiceMeta()
 
     sort.Strings(serviceMeta.envs)
     sort.Strings(serviceMeta.services)
@@ -932,10 +942,15 @@ func serviceRun(opts docopt.Opts) {
         siteMountMode = MOUNT_MODE_YES
     }
 
+    state := getWarpState()
+    dockerHubClient := NewDockerHubClient(state)
+
     quit := make(chan os.Signal, 1)
     signal.Notify(quit, syscall.SIGQUIT)
     signal.Notify(quit, syscall.SIGTERM)
     runWorker := &RunWorker{
+        warpState: state,
+        dockerHubClient: dockerHubClient,
         env: env,
         service: service,
         block: block,

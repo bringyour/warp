@@ -10,7 +10,56 @@ import (
 	"fmt"
 	"sort"
 	"regexp"
+	"net"
+	"runtime"
 )
+
+
+
+type CommandList struct {
+	commands []*exec.Cmd
+	ignore map[int]bool
+	dir string
+}
+
+func NewCommandList() *CommandList {
+	return &CommandList{
+		commands: []*exec.Cmd{},
+		ignore: map[int]bool{},
+	}
+}
+
+func (self *CommandList) sudo(name string, args ...string) *CommandList {
+	cmd := sudo(name, args...)
+	cmd.Dir = self.dir
+	self.commands = append(self.commands, cmd)
+	return self
+}
+
+func (self *CommandList) docker(name string, args ...string) *CommandList {
+	cmd := docker(name, args...)
+	cmd.Dir = self.dir
+	self.commands = append(self.commands, cmd)
+	return self
+}
+
+func (self *CommandList) ignoreErrors() {
+	self.ignore[len(self.commands) - 1] = true
+}
+
+func (self *CommandList) run() {
+	for i, cmd := range self.commands {
+		fmt.Printf("RUNNING COMMAND %s\n", cmd)
+		err := cmd.Run()
+		if err != nil {
+			if ignore, ok := self.ignore[i]; !ok || !ignore  {
+				panic(err)
+			}
+		}
+	}
+}
+
+
 
 
 func sudo(name string, args ...string) *exec.Cmd {
@@ -23,10 +72,14 @@ func sudo(name string, args ...string) *exec.Cmd {
 
 func docker(name string, args ...string) *exec.Cmd {
 	flatArgs := []string{}
-	flatArgs = append(flatArgs, "docker")
 	flatArgs = append(flatArgs, name)
 	flatArgs = append(flatArgs, args...)
-	return exec.Command("sudo", flatArgs...)
+	switch runtime.GOOS {
+	case "linux":
+		return sudo("docker", flatArgs...)
+	default:
+		return exec.Command("docker", flatArgs...)
+	}
 }
 
 
@@ -153,6 +206,24 @@ func indentAndTrimString(text string, indent int) string {
 
 
 	return strings.Join(indentedLines, "\n")
+}
+
+
+
+func nextIp(ipNet net.IPNet, count int) net.IP {
+    ip := ipNet.IP.Mask(ipNet.Mask)
+	ones, _ := ipNet.Mask.Size()
+	i := ones / 8
+
+	for k := 0; k < count; k += i {
+		ip[i] += 0x01 >> (ones % 8)
+		// propagate the overflow bit forward
+		for j := i; ip[j] == 0 && j + 1 < len(ip); j += 1 {
+			ip[j + 1] += 0x01
+		}
+	}
+
+	return ip
 }
 
 

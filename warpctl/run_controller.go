@@ -3,7 +3,7 @@ package main
 
 import (
 	"os"
-	"os/exec"
+	// "os/exec"
 	"time"
 	"strings"
 	"fmt"
@@ -17,7 +17,6 @@ import (
 
 
 	"github.com/coreos/go-semver/semver"
-	"github.com/apparentlymart/go-cidr/cidr"
 )
 
 
@@ -44,6 +43,9 @@ const (
 
 
 type RunWorker struct {
+	warpState *WarpState
+	dockerHubClient *DockerHubClient
+
 	env string
 	service string
 	block string
@@ -80,35 +82,55 @@ func (self *RunWorker) run() {
 	watcher:
 	for {
 		latestVersion, latestConfigVersion := self.getLatestVersion()
-		if self.deployedVersion != latestVersion || 
-				self.configMountMode == MOUNT_MODE_YES && self.deployedConfigVersion != latestConfigVersion {
+		fmt.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
+
+		deployVersion := func()(bool) {
+			if latestVersion == nil {
+				return false
+			}
+			if self.deployedVersion != nil && *self.deployedVersion == *latestVersion {
+				return false
+			}
+			if self.configMountMode != MOUNT_MODE_YES {
+				return true
+			}
+			if latestConfigVersion == nil {
+				return false
+			}
+			if self.deployedConfigVersion != nil && *self.deployedConfigVersion == *latestConfigVersion {
+				return false
+			}
+			return true
+		}()
+
+		if deployVersion {
 			// deploy new version
 			self.deployedVersion = latestVersion
 			self.deployedConfigVersion = latestConfigVersion
 
-			if self.deployedVersion == nil {
-				announceRunWaitForVersion()
-			} else if self.deployedConfigVersion == nil && self.configMountMode == MOUNT_MODE_YES {
-				announceRunWaitForConfig()
-			} else {
-				func() {
-					announceRunStart()
-					defer func() {
-						if err := recover(); err != nil {
-							announceRunError()	
-						}
-					}()
-					err := self.deploy()
-					if err != nil {
-						announceRunFail()
-					} else {
-						announceRunSuccess()
+			fmt.Printf("DEPLOY VERSION %s %s\n", self.deployedVersion, self.deployedConfigVersion)
+			func() {
+				announceRunStart()
+				defer func() {
+					if err := recover(); err != nil {
+						announceRunError()	
 					}
 				}()
-			}
+				err := self.deploy()
+				if err != nil {
+					announceRunFail()
+				} else {
+					announceRunSuccess()
+				}
+			}()
+		} else if latestVersion == nil {
+			announceRunWaitForVersion()
+		} else if latestConfigVersion == nil {
+			announceRunWaitForConfig()
 		}
 		select {
 		case <- self.quit:
+			fmt.Printf("Quit signal detected. Exiting run loop.\n")
 			break watcher
 		case <-time.After(5 * time.Second):
 			// continue
@@ -120,16 +142,16 @@ func (self *RunWorker) run() {
 // service version, config version
 func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
 
-	state := getWarpState()
+	
 
-	versionMeta := getVersionMeta(self.env, self.service)
+	versionMeta := self.dockerHubClient.getVersionMeta(self.env, self.service)
 	latestVersion := versionMeta.latestBlocks[self.block]
 
 	var latestConfigVersion *semver.Version
-	if state.warpSettings.ConfigHome == nil {
+	if self.warpState.warpSettings.ConfigHome == nil {
 		latestConfigVersion = nil
 	} else {
-		entries, err := os.ReadDir(*state.warpSettings.ConfigHome)
+		entries, err := os.ReadDir(*self.warpState.warpSettings.ConfigHome)
 	    if err != nil {
 	    	panic(err)
 	    }
@@ -163,50 +185,59 @@ func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
 
 
 func (self *RunWorker) initRoutingTable() {
-	cmds := []*exec.Cmd{
-		sudo("ip", "route", "flush",
-			 "table", self.routingTable.tableName),
+	cmds := NewCommandList()
 
-		// add routes for:
-		// - interface (default)
-		// - docker services interface
-		// - docker interface
+	cmds.sudo(
+		"ip", "route", "flush",
+		"table", self.routingTable.tableName,
+	).ignoreErrors()
 
-		sudo("ip", "route", "add", self.routingTable.interfaceIpv4Subnet, 
-			 "dev", self.routingTable.interfaceName, 
-			 "src", self.routingTable.interfaceIpv4, 
-			 "table", self.routingTable.tableName),
-	    sudo("ip", "route", "add", self.servicesDockerNetwork.interfaceIpv4Subnet, 
-	    	 "dev", self.servicesDockerNetwork.interfaceName,
-	    	 "src", self.servicesDockerNetwork.interfaceIpv4,
-	    	 "table", self.routingTable.tableName),
-	   	sudo("ip", "route", "add", self.dockerNetwork.interfaceIpv4Subnet, 
-	    	 "dev", self.dockerNetwork.interfaceName,
-	    	 "src", self.dockerNetwork.interfaceIpv4,
-	    	 "table", self.routingTable.tableName),
-	   	sudo("ip", "route", "add", "default",
-	   		 "via", self.routingTable.interfaceIpv4Gateway,
-	   		 "dev", self.routingTable.interfaceName,
-	   		 "table", self.routingTable.tableName),
+	// add routes for:
+	// - interface (default)
+	// - docker services interface
+	// - docker interface
 
-	    // use the table from:
-	    // - interface ip (sockets bound to the interface)
-	    // - docker interface subnet (sockets in docker containers in the network)
+	cmds.sudo(
+		"ip", "route", "add", self.routingTable.interfaceIpv4Subnet, 
+		"dev", self.routingTable.interfaceName, 
+		"src", self.routingTable.interfaceIpv4, 
+		"table", self.routingTable.tableName,
+	)
+    cmds.sudo(
+    	"ip", "route", "add", self.servicesDockerNetwork.interfaceIpv4Subnet, 
+    	"dev", self.servicesDockerNetwork.interfaceName,
+    	"src", self.servicesDockerNetwork.interfaceIpv4,
+    	"table", self.routingTable.tableName,
+    )
+   	cmds.sudo(
+   		"ip", "route", "add", self.dockerNetwork.interfaceIpv4Subnet, 
+    	"dev", self.dockerNetwork.interfaceName,
+    	"src", self.dockerNetwork.interfaceIpv4,
+    	"table", self.routingTable.tableName,
+    )
+   	cmds.sudo(
+   		"ip", "route", "add", "default",
+   		"via", self.routingTable.interfaceIpv4Gateway,
+   		"dev", self.routingTable.interfaceName,
+   		"table", self.routingTable.tableName,
+   	)
 
-	   	sudo("ip", "rule", "add",
-	   		 "from", self.routingTable.interfaceIpv4Gateway,
-	   		 "table", self.routingTable.tableName),
-		sudo("ip", "rule", "add",
-	   		 "from", self.dockerNetwork.interfaceIpv4Subnet,
-	   		 "table", self.routingTable.tableName),
-	}
+    // use the table from:
+    // - interface ip (sockets bound to the interface)
+    // - docker interface subnet (sockets in docker containers in the network)
 
-	for _, cmd := range cmds {
-		err := cmd.Run()
-		if err != nil {
-			panic(err)
-		}
-	}
+   	cmds.sudo(
+   		"ip", "rule", "add",
+   		"from", self.routingTable.interfaceIpv4Gateway,
+   		"table", self.routingTable.tableName,
+   	)
+	cmds.sudo(
+		"ip", "rule", "add",
+   		"from", self.dockerNetwork.interfaceIpv4Subnet,
+   		"table", self.routingTable.tableName,
+   	)
+
+	cmds.run()
 }
 
 
@@ -216,37 +247,39 @@ func (self *RunWorker) iptablesChainName() string {
 		"WARP-%s-%s-%s",
 		strings.ToUpper(self.env),
 		strings.ToUpper(self.service),
-		strings.ToUpper(self.block),
+		strings.ToUpper(self.routingTable.interfaceName),
 	)
 }
 
 
 func (self *RunWorker) initBlockRedirect() {
+	cmds := NewCommandList()
+
 	chainName := self.iptablesChainName()
-	cmds := []*exec.Cmd{
-		sudo("iptables", "-t", "nat", "-N", chainName),
+	cmds.sudo(
+		"iptables", "-t", "nat", "-N", chainName,
+	).ignoreErrors()
 
-		// apply chain to external traffic to local
-		sudo("iptables", "-t", "nat", "-I", "PREROUTING",
-			 "-m", "addrtype", "--dst-type", "LOCAL",
-			 "-j", chainName),
+	// apply chain to external traffic to local
+	cmds.sudo(
+		"iptables", "-t", "nat", "-I", "PREROUTING",
+		"-m", "addrtype", "--dst-type", "LOCAL",
+		"-j", chainName,
+	)
 
-		// apply chain to local traffic to local
-		sudo("iptables", "-t", "nat", "-I", "OUTPUT",
-			 "-m", "addrtype", "--dst-type", "LOCAL",
-			 "-j", chainName),
-	}
+	// apply chain to local traffic to local
+	cmds.sudo(
+		"iptables", "-t", "nat", "-I", "OUTPUT",
+		"-m", "addrtype", "--dst-type", "LOCAL",
+		"-j", chainName,
+	)
 
-	for _, cmd := range cmds {
-		err := cmd.Run()
-		if err != nil {
-			panic(err)
-		}
-	}
+	cmds.run()
 }
 
 
 
+// FIXME this appears to not be working
 func (self *RunWorker) deploy() error {
 	externalsPortsToInternalPort, servicePortsToInternalPort := self.findDeployPorts()
 
@@ -327,8 +360,6 @@ func (self *RunWorker) findDeployPorts() (map[int]int, map[int]int) {
 }
 
 func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (string, error) {
-	state := getWarpState()
-
 	vaultMount := "/srv/warp/vault"
 	configMount := "/srv/warp/config"
 	siteMount := "/srv/warp/site"
@@ -343,7 +374,7 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 	)
 	imageName := fmt.Sprintf(
 		"%s/%s-%s:%s",
-		state.warpSettings.DockerNamespace,
+		self.warpState.warpSettings.DockerNamespace,
 		self.env,
 		self.service,
 		self.deployedVersion.String(),
@@ -364,9 +395,9 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 		args = append(args, []string{"--network", self.servicesDockerNetwork.networkName}...)
 	}
 	if self.dockerNetwork != nil {
-		args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.dockerNetwork.networkName, self.dockerNetwork.interfaceIpv4Gateway)}...)
+		args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.dockerNetwork.networkName, self.dockerNetwork.interfaceIpv4)}...)
 	}
-	args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.servicesDockerNetwork.networkName, self.servicesDockerNetwork.interfaceIpv4Gateway)}...)
+	args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.servicesDockerNetwork.networkName, self.servicesDockerNetwork.interfaceIpv4)}...)
 
 	switch self.vaultMountMode {
 	case MOUNT_MODE_YES:
@@ -374,7 +405,7 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 			"--mount",
 			fmt.Sprintf(
 				"type=bind,source=%s,target=%s,readonly",
-				state.warpSettings.RequireVaultHome(),
+				self.warpState.warpSettings.RequireVaultHome(),
 				vaultMount,
 			),
 		}...)
@@ -383,7 +414,7 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 	switch self.configMountMode {
 	case MOUNT_MODE_YES:
 		configVersionHome := path.Join(
-			state.warpSettings.RequireConfigHome(),
+			self.warpState.warpSettings.RequireConfigHome(),
 			self.deployedConfigVersion.String(),
 		)
 		args = append(args, []string{
@@ -400,7 +431,7 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 			"--mount",
 			fmt.Sprintf(
 				"type=bind,source=%s,target=%s",
-				state.warpSettings.RequireConfigHome(),
+				self.warpState.warpSettings.RequireConfigHome(),
 				configMount,
 			),
 		}...)
@@ -412,13 +443,19 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 			"--mount",
 			fmt.Sprintf(
 				"type=bind,source=%s,target=%s,readonly",
-				state.warpSettings.RequireSiteHome(),
+				self.warpState.warpSettings.RequireSiteHome(),
 				siteMount,
 			),
 		}...)
 	}
 
 	args = append(args, imageName)
+	if self.service == "lb" {
+		// the lb expects the path of the config to be given as an arg
+		// TODO ideally this could be handled with an env var in the docker image, 
+		// TODO but unfortunately docker does not allow env vars in the command
+		args = append(args, fmt.Sprintf("/srv/warp/nginx.conf/%s.conf", self.block))
+	}
 
 	cmd := docker("run", args...)
 	out, err := cmd.Output()
@@ -488,22 +525,25 @@ func (self *RunWorker) pollContainerStatus(servicePortsToInternalPort map[int]in
 
 func (self *RunWorker) redirect(externalsPortsToInternalPort map[int]int) {
 	chainName := self.iptablesChainName()
+
+	cmds := NewCommandList()
+
     // remove the rule then insert it back at the end
     for _, op := range []string{"-D", "-A"} {
     	for externalPort, internalPort := range externalsPortsToInternalPort {
-		    cmd := sudo("iptables", "-t", "nat", op, chainName,
-		    	        "-p", "tcp", "-m", "tcp", "--dport", strconv.Itoa(externalPort),
-		    	        "-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort))
-		    err := cmd.Run()
-		    if err != nil {
-		    	panic(err)
-		    }
+		    cmds.sudo(
+		    	"iptables", "-t", "nat", op, chainName,
+		    	"-p", "tcp", "-m", "tcp", "--dport", strconv.Itoa(externalPort),
+		    	"-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
+		    )
 		}
 	}
 	// for efficiency, remove other rules at the front of the chain
 	// FIXME
 	// "iptables -L chainName --line-numbers"
 	// "iptables -t nat -D chainName 1"
+
+	cmds.run()
 }
 
 
@@ -644,7 +684,7 @@ func parseDockerNetwork(dockerNetworkStr string) *DockerNetwork {
 	if len(networkInterfaces) == 0 {
 		panic(errors.New(fmt.Sprintf("Could not map docker interface %s to interface", interfaceName)))
 	}
-	if 0 < len(networkInterfaces) {
+	if 1 < len(networkInterfaces) {
 		panic(errors.New(fmt.Sprintf("More than one network attached to interface %s", interfaceName)))
 	}
 	networkInterface := networkInterfaces[0]
@@ -696,7 +736,7 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
 	if len(networkInterfaces) == 0 {
 		panic(errors.New(fmt.Sprintf("Could not find interface %s", interfaceName)))
 	}
-	if 0 < len(networkInterfaces) {
+	if 1 < len(networkInterfaces) {
 		panic(errors.New(fmt.Sprintf("More than one network attached to interface %s", interfaceName)))
 	}
 	networkInterface := networkInterfaces[0]
@@ -713,6 +753,8 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
 func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, error) {
 	// see https://github.com/golang/go/issues/12551
 
+	fmt.Printf("GET NETWORK INTERFACES %s\n", interfaceName)
+
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
 		return nil, err
@@ -726,23 +768,43 @@ func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, error) {
     networkInterfaces := []*NetworkInterface{}
 
     for _, addr := range addrs {
-        if netw, ok := addr.(*net.IPNet); ok {
-            if netw.IP.To4() != nil {
-            	gatewayIp, err := cidr.Host(netw, 1)
-            	if err != nil {
-            		return nil, err
-            	}
+        if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+        	// gatewayIp, err := cidr.Host(netw, 1)
+        	// if err != nil {
+        	// 	return nil, err
+        	// }
+        	// gatewayIp := net.IP(networkIp)
+        	// ipnetgen.Increment(gatewayIp)
 
-            	networkInterface := &NetworkInterface{
-            		interfaceName: interfaceName,
-            		interfaceIpv4: addr.String(),
-	            	interfaceIpv4Subnet: netw.String(),
-	            	interfaceIpv4Gateway: gatewayIp.String(),
-	            }
-	            networkInterfaces = append(networkInterfaces, networkInterface)
+        	zeroedIpNet := net.IPNet{
+        		IP: ipNet.IP.Mask(ipNet.Mask),
+        		Mask: ipNet.Mask,
+        	}
+
+        	gateway := nextIp(zeroedIpNet, 1)
+
+
+        	networkInterface := &NetworkInterface{
+        		interfaceName: interfaceName,
+        		interfaceIpv4: ipNet.IP.String(),
+            	interfaceIpv4Subnet: zeroedIpNet.String(),
+            	interfaceIpv4Gateway: gateway.String(),
             }
+            networkInterfaces = append(networkInterfaces, networkInterface)
         }
     }
+
+    for _, networkInterface := range networkInterfaces {
+    	fmt.Printf(
+    		"%s ipv4=%s ipv4_subnet=%s ipv4_gateway=%s\n",
+    		networkInterface.interfaceName,
+    		networkInterface.interfaceIpv4,
+    		networkInterface.interfaceIpv4Subnet,
+    		networkInterface.interfaceIpv4Gateway,
+    	)
+    }
+
+
 
 	return networkInterfaces, nil
 }

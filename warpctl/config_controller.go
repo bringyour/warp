@@ -1005,6 +1005,13 @@ func (self *NginxConfig) addLbBlock() {
             "relativeTlsKeyPath": self.relativeTlsKeyPath,
         })
 
+        self.block("location =/status", func() {
+            self.raw(`
+            root /srv/warp/status/;
+            add_header Content-Type application/json;
+            `, map[string]any{})
+        })
+
         // /by/service/{service}/
         // /by/b/{service}/{name}/
 
@@ -1272,7 +1279,7 @@ ReadWriteDirectories=-/etc/redis
         routingTable := routingTables[0]
 
         parts = append(parts, []string{
-            fmt.Sprintf("--rttable=%d", routingTable),
+            fmt.Sprintf(`--rttable="%s:%d"`, blockInfo.interfaceName, routingTable),
             fmt.Sprintf("--dockernet=%s", blockInfo.lbBlock.DockerNetwork),
         }...)
 
@@ -1288,7 +1295,7 @@ ReadWriteDirectories=-/etc/redis
                 )
                 portBlockParts = append(portBlockParts, portBlockPart)
             }
-            part := fmt.Sprintf("--portblocks=%s", strings.Join(portBlockParts, ";"))
+            part := fmt.Sprintf(`--portblocks="%s"`, strings.Join(portBlockParts, ";"))
             parts = append(parts, part)
         }
 

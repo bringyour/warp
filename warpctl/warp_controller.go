@@ -96,7 +96,7 @@ func getWarpState() *WarpState {
     }
     warpVersionHome := os.Getenv("WARP_VERSION_HOME")
     if warpVersionHome == "" {
-        panic("WARP_VERSION_HOME must be set.")
+        warpVersionHome = warpHome
     }
 
     var err error
@@ -135,7 +135,7 @@ func setWarpState(state *WarpState) {
     }
     warpVersionHome := os.Getenv("WARP_VERSION_HOME")
     if warpVersionHome == "" {
-        panic("WARP_VERSION_HOME must be set.")
+        warpVersionHome = warpHome
     }
 
     var err error
@@ -238,29 +238,19 @@ type DockerHubClient struct {
 }
 
 func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
-	state := getWarpState()
-
-    if state.warpSettings.DockerHubUsername == nil {
-    	panic("DockerHub username must be set.")
-    }
-    if state.warpSettings.DockerHubToken == nil {
-    	panic("DockerHub username must be set.")
-    }
-    if state.warpSettings.DockerNamespace == nil {
-    	panic("Docker namespace must be set.")
-    }
+	// state := getWarpState()
 
 	httpClient := &http.Client{}
 
     dockerHubLoginRequest := DockerHubLoginRequest{
-    	Username: *state.warpSettings.DockerHubUsername,
-    	Password: *state.warpSettings.DockerHubToken,
+    	Username: warpState.warpSettings.RequireDockerHubUsername(),
+    	Password: warpState.warpSettings.RequireDockerHubToken(),
     }
     loginRequestJson, err := json.Marshal(dockerHubLoginRequest)
     if err != nil {
     	panic(err)
     }
-
+    fmt.Printf("LOGIN JSON %s\n", loginRequestJson)
     loginRequest, err := http.NewRequest(
     	"POST",
     	"https://hub.docker.com/v2/users/login",
@@ -285,8 +275,10 @@ func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
     	panic(err)
     }
 
+    fmt.Printf("LOGIN GOT RESPONSE %s\n", dockerHubLoginResponse.Token)
+
     return &DockerHubClient{
-    	warpState: state,
+    	warpState: warpState,
     	httpClient: httpClient,
     	token: dockerHubLoginResponse.Token,
     }
@@ -300,7 +292,7 @@ func (self *DockerHubClient) AddAuthorizationHeader(request *http.Request) {
 func (self *DockerHubClient) NamespaceUrl(path string) string {
 	return fmt.Sprintf(
 		"https://hub.docker.com/v2/namespaces/%s%s",
-		*self.warpState.warpSettings.DockerNamespace,
+		self.warpState.warpSettings.RequireDockerNamespace(),
 		path,
 	)
 }
@@ -322,22 +314,22 @@ type VersionMeta struct {
 }
 
 
-func getServiceMeta() *ServiceMeta {
-	state := getWarpState()
-    client := NewDockerHubClient(state)
+func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
+	// state := getWarpState()
+    // client := NewDockerHubClient(state)
 
     repoNames := []string{}
 
-    url := client.NamespaceUrl("/repositories")
+    url := self.NamespaceUrl("/repositories")
     for {
     	// fmt.Printf("%s\n", url)
 	    reposRequest, err := http.NewRequest("GET", url, nil)
 	    if err != nil {
 	    	panic(err)
 	    }
-	    client.AddAuthorizationHeader(reposRequest)
+	    self.AddAuthorizationHeader(reposRequest)
 
-	    reposResponse, err := client.httpClient.Do(reposRequest)
+	    reposResponse, err := self.httpClient.Do(reposRequest)
 	    if err != nil {
 	    	panic(err)
 	    }
@@ -353,7 +345,8 @@ func getServiceMeta() *ServiceMeta {
 	    }
 
 		for _, result := range dockerHubReposResponse.Results {
-			if result.RepositoryType == "image" && result.StatusDescription == "active" {
+			fmt.Printf("SCANNING RESULT %s\n", result)
+			if /*result.RepositoryType == "image" &&*/ result.StatusDescription == "active" {
 				repoNames = append(repoNames, result.Name)
 			}
 		}
@@ -363,6 +356,8 @@ func getServiceMeta() *ServiceMeta {
 		}
 		url = *dockerHubReposResponse.NextUrl
 	}
+
+	fmt.Printf("FOUND REPO NAMES %s\n", repoNames)
 
 	envVersionMetas := map[string]map[string]*VersionMeta{}
 
@@ -381,7 +376,7 @@ func getServiceMeta() *ServiceMeta {
 		env := groups[1]
 		service := groups[2]
 
-		versionMeta := getVersionMeta(env, service)
+		versionMeta := self.getVersionMeta(env, service)
 
 		if envVersionMetas[env] == nil {
 			envVersionMetas[env] = map[string]*VersionMeta{}
@@ -408,24 +403,24 @@ func getServiceMeta() *ServiceMeta {
 }
 
 
-func getVersionMeta(env string, service string) *VersionMeta {
-	state := getWarpState()
-    client := NewDockerHubClient(state)
+func (self *DockerHubClient) getVersionMeta(env string, service string) *VersionMeta {
+	// state := getWarpState()
+    // client := NewDockerHubClient(state)
 
 	versionsMap := map[*semver.Version]bool{}
 	latestBlocks := map[string]*semver.Version{}
 
 	latestRegex := regexp.MustCompile("^(.*)-latest$")
 
-	url := client.NamespaceUrl(fmt.Sprintf("/repositories/%s-%s/images", env, service))
+	url := self.NamespaceUrl(fmt.Sprintf("/repositories/%s-%s/images", env, service))
 	for {
 	    imagesRequest, err := http.NewRequest("GET", url, nil)
 	    if err != nil {
 	    	panic(err)
 	    }
-	    client.AddAuthorizationHeader(imagesRequest)
+	    self.AddAuthorizationHeader(imagesRequest)
 
-	    imagesResponse, err := client.httpClient.Do(imagesRequest)
+	    imagesResponse, err := self.httpClient.Do(imagesRequest)
 	    if err != nil {
 	    	panic(err)
 	    }
@@ -439,28 +434,36 @@ func getVersionMeta(env string, service string) *VersionMeta {
 	    	panic(err)
 	    }
 
-	    imageVersions := []*semver.Version{}
+	    
 		for _, result := range dockerHubImagesResponse.Results {
 			if result.Status == "active" {
+				imageVersions := []*semver.Version{}
+
 				for _, tag := range result.Tags {
 					if tag.IsCurrent {
 						// fmt.Printf("tag %s %t\n", tag.Tag, tag.IsCurrent)
-						if version, err := semver.NewVersion(tag.Tag); err == nil {
+						versionStr := convertVersionFromDocker(tag.Tag)
+						if version, err := semver.NewVersion(versionStr); err == nil {
 							// fmt.Printf("v %s %t\n", version, tag.IsCurrent)
 							imageVersions = append(imageVersions, version)
 							versionsMap[version] = true
 						}
 					}
 				}
-			}
-		}
-		for _, result := range dockerHubImagesResponse.Results {
-			if result.Status == "active" {
+
+				// resolve the latest tag against the other version tags on the image
 				for _, tag := range result.Tags {
 					if tag.IsCurrent {
 						if groups := latestRegex.FindStringSubmatch(tag.Tag); groups != nil {
+							fmt.Printf("MATCHED LATEST VERSION AGAINST %s\n", tag.Tag)
 							block := groups[1]
-							latestBlocks[block] = imageVersions[len(imageVersions) - 1]
+							if len(imageVersions) == 0 {
+								panic("Latest tag does not have an associated version.")
+							}
+							if 1 < len(imageVersions) {
+								panic("Latest tag has more than one associated version.")
+							}
+							latestBlocks[block] = imageVersions[0]
 						}
 					}
 				}

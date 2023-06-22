@@ -503,8 +503,8 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
             configCount += count
         }
 
-        semver.Sort(serviceVersions)
-        semver.Sort(configVersions)
+        semverSortWithBuild(serviceVersions)
+        semverSortWithBuild(configVersions)
 
         if 0 < len(statusVersions.errors) {
             fmt.Printf("** errors **:\n")

@@ -109,7 +109,7 @@ Usage:
     warpctl ls versions [<env> [<service>]]
     warpctl lb list-blocks <env>
     warpctl lb list-hosts <env>
-    warpctl lb create-config <env> [<block>] [--envalias=<envalias>]
+    warpctl lb create-config <env> [<block>] [--envalias=<envalias>] [--out=<path>]
     warpctl run-local <Makefile> [--envalias=<envalias>]
     warpctl service run <env> <service> <block>
         [--rttable=<rttable> --dockernet=<dockernet>]
@@ -458,8 +458,10 @@ func deploy(opts docopt.Opts) {
             panic("No matching versions.")
         }
 
-        semver.Sort(filteredVersions)
+        semverSortWithBuild(filteredVersions)
         deployVersion = filteredVersions[len(filteredVersions) - 1].String()
+
+        fmt.Printf("FILTERED VERSIONS %s\n", filteredVersions)
     }
 
     fmt.Printf("Selected version %s\n", deployVersion)
@@ -601,7 +603,7 @@ func lsServices(opts docopt.Opts) {
                         versionCounts[version] += 1
                     }
                     versions := maps.Keys(versionCounts)
-                    semver.Sort(versions)
+                    semverSortWithBuild(versions)
                     histoParts := []string{}
                     for _, version := range versions {
                         versionCount := versionCounts[version]
@@ -701,7 +703,7 @@ func lsVersions(opts docopt.Opts) {
             if versionMeta, ok := serviceMeta.envVersionMetas[env][service]; ok {                
                 // summarize per base (MAJOR, MINOR, R) in MAJOR.MINOR.[p-P,p,p-P]-R+COUNT range format
 
-                semver.Sort(versionMeta.versions)
+                semverSortWithBuild(versionMeta.versions)
 
                 baseVersionsMap := map[*semver.Version][]*semver.Version{}
                 for _, version := range versionMeta.versions {
@@ -709,10 +711,10 @@ func lsVersions(opts docopt.Opts) {
                     baseVersionsMap[baseVersion] = append(baseVersionsMap[baseVersion], version)
                 }
                 baseVersions := maps.Keys(baseVersionsMap)
-                semver.Sort(baseVersions)
+                semverSortWithBuild(baseVersions)
                 for _, baseVersion := range baseVersions {
                     versions := baseVersionsMap[baseVersion]
-                    semver.Sort(versions)
+                    semverSortWithBuild(versions)
                     patchParts := []string{}
                     for i := 0; i < len(versions); {
                         j := i + 1
@@ -835,9 +837,11 @@ func lbCreateConfig(opts docopt.Opts) {
     nginxConfig := NewNginxConfig(env, envAliases)
     blockConfigs := nginxConfig.generate()
 
+    outParts := []string{}
+
     if len(includeBlocks) == 0 {
         for block, config := range blockConfigs {
-            fmt.Printf("#\n# %s\n#\n\n%s", block, config)
+            outParts = append(outParts, fmt.Sprintf("#\n# %s\n#\n\n%s", block, config))
         }
     } else if len(includeBlocks) == 1 {
         block := includeBlocks[0]
@@ -845,17 +849,25 @@ func lbCreateConfig(opts docopt.Opts) {
         if !ok {
             panic(fmt.Sprintf("Block \"%s\" not found", block))
         }
-        fmt.Printf("%s", config)
+        outParts = append(outParts, config)
     } else {
         for _, block := range includeBlocks {
             config, ok := blockConfigs[block]
             if !ok {
                 panic(fmt.Sprintf("Block \"%s\" not found", block))
             }
-            fmt.Printf("#\n# %s\n#\n\n%s", block, config)
+            outParts = append(outParts, fmt.Sprintf("#\n# %s\n#\n\n", block))
+            outParts = append(outParts, config)
         }
     }
 
+    outStr := strings.Join(outParts, "\n")
+
+    if outPath, err := opts.String("--out"); err == nil {
+        os.WriteFile(outPath, []byte(outStr), 0644)
+    } else {
+        fmt.Printf("%s", outStr)
+    }
 }
 
 

@@ -12,6 +12,10 @@ import (
 	"regexp"
 	"net"
 	"runtime"
+
+	"golang.org/x/exp/slices"
+
+	"github.com/coreos/go-semver/semver"
 )
 
 
@@ -39,6 +43,11 @@ func (self *CommandList) sudo(name string, args ...string) *CommandList {
 func (self *CommandList) docker(name string, args ...string) *CommandList {
 	cmd := docker(name, args...)
 	cmd.Dir = self.dir
+	self.commands = append(self.commands, cmd)
+	return self
+}
+
+func (self *CommandList) add(cmd *exec.Cmd) *CommandList {
 	self.commands = append(self.commands, cmd)
 	return self
 }
@@ -226,4 +235,19 @@ func nextIp(ipNet net.IPNet, count int) net.IP {
 	return ip
 }
 
+
+
+func semverSortWithBuild(versions []*semver.Version) {
+	slices.SortStableFunc(versions, func(a *semver.Version, b *semver.Version)(bool) {
+		if a.LessThan(*b) {
+			return true
+		}
+		if a.Equal(*b) {
+			if a.Metadata < b.Metadata {
+				return true
+			}
+		}
+		return false
+	})
+}
 

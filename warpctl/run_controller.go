@@ -3,7 +3,7 @@ package main
 
 import (
 	"os"
-	// "os/exec"
+	"os/exec"
 	"time"
 	"strings"
 	"fmt"
@@ -68,6 +68,9 @@ type RunWorker struct {
 func (self *RunWorker) run() {
 	// on start, deploy the latest version and start the watcher loop
 
+	announceRunEnter()
+	defer annountRunExit()
+
 	// enable policy routing
 	if self.routingTable != nil {
 		self.initRoutingTable()
@@ -113,13 +116,16 @@ func (self *RunWorker) run() {
 				announceRunStart()
 				defer func() {
 					if err := recover(); err != nil {
-						announceRunError()	
+						fmt.Printf("DEPlOY ERROR %s %s\n", self.deployedVersion, self.deployedConfigVersion)
+						announceRunError()
 					}
 				}()
 				err := self.deploy()
 				if err != nil {
+					fmt.Printf("DEPLOY FAILED %s %s %s\n", self.deployedVersion, self.deployedConfigVersion, err)
 					announceRunFail()
 				} else {
+					fmt.Printf("DEPLOY SUCCESS %s %s\n", self.deployedVersion, self.deployedConfigVersion)
 					announceRunSuccess()
 				}
 			}()
@@ -164,7 +170,7 @@ func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
 	    		}
 	    	}
 	    }
-	    semver.Sort(configVersions)
+	    semverSortWithBuild(configVersions)
 
 	    
 	    if len(configVersions) == 0 {
@@ -252,6 +258,8 @@ func (self *RunWorker) iptablesChainName() string {
 }
 
 
+// we exepct some small downtime when the run worker starts
+// treat the same a host reboot or update. this is where redundant hosts are needed 
 func (self *RunWorker) initBlockRedirect() {
 	cmds := NewCommandList()
 
@@ -259,20 +267,51 @@ func (self *RunWorker) initBlockRedirect() {
 	cmds.sudo(
 		"iptables", "-t", "nat", "-N", chainName,
 	).ignoreErrors()
+ 
+	cmds.sudo(
+		"iptables", "-t", "nat", "-F", chainName,
+	).ignoreErrors()
+
+
+	chainCmd := func(op string, entryChainName string) *exec.Cmd {
+		return sudo(
+			"iptables", "-t", "nat", op, entryChainName,
+			"-m", "addrtype", "--dst-type", "LOCAL",
+			"-j", chainName,
+		)
+	}
 
 	// apply chain to external traffic to local
-	cmds.sudo(
-		"iptables", "-t", "nat", "-I", "PREROUTING",
-		"-m", "addrtype", "--dst-type", "LOCAL",
-		"-j", chainName,
-	)
+	for {
+		cmd := chainCmd("-D", "PREROUTING")
+		err := cmd.Run()
+		if err != nil {
+			break
+		}
+	}
+	cmds.add(chainCmd("-I", "PREROUTING"))
+
+	// cmds.sudo(
+	// 	"iptables", "-t", "nat", "-I", "PREROUTING",
+	// 	"-m", "addrtype", "--dst-type", "LOCAL",
+	// 	"-j", chainName,
+	// )
 
 	// apply chain to local traffic to local
-	cmds.sudo(
-		"iptables", "-t", "nat", "-I", "OUTPUT",
-		"-m", "addrtype", "--dst-type", "LOCAL",
-		"-j", chainName,
-	)
+	for {
+		cmd := chainCmd("-D", "OUTPUT")
+		err := cmd.Run()
+		if err != nil {
+			break
+		}
+	}
+	cmds.add(chainCmd("-I", "OUTPUT"))
+
+	// cmds.sudo(
+	// 	"iptables", "-t", "nat", "-I", "OUTPUT",
+	// 	"-m", "addrtype", "--dst-type", "LOCAL",
+	// 	"-j", chainName,
+	// )
 
 	cmds.run()
 }
@@ -281,10 +320,12 @@ func (self *RunWorker) initBlockRedirect() {
 
 // FIXME this appears to not be working
 func (self *RunWorker) deploy() error {
-	externalsPortsToInternalPort, servicePortsToInternalPort := self.findDeployPorts()
+	externalsPortsToInternalPort, servicePortsToInternalPort := self.waitForDeployPorts()
+	fmt.Printf("Ports %s, %s\n", externalsPortsToInternalPort, servicePortsToInternalPort)
 
     deployedContainerId, err := self.startContainer(servicePortsToInternalPort)
     if err != nil {
+    	fmt.Printf("Start container failed %s\n", err)
     	return err
     }
     success := false
@@ -324,18 +365,20 @@ func (self *RunWorker) deploy() error {
     return nil
 }
 
-func (self *RunWorker) findDeployPorts() (map[int]int, map[int]int) {
+func (self *RunWorker) waitForDeployPorts() (map[int]int, map[int]int) {
 	for {
 		externalsPortsToInternalPort := map[int]int{}
 
 		runningContainers, err := self.findRunningContainers()
 		if err != nil {
-			for externalPort, internalPorts := range self.portBlocks.externalsToInternals {
-				for _, internalPort := range internalPorts {
-					if _, ok := runningContainers[internalPort]; !ok {
-						externalsPortsToInternalPort[externalPort] = internalPort
-						break
-					}
+			fmt.Printf("FIND RUNNING CONTAINERS ERROR %s\n", err)
+			panic(err)
+		}
+		for externalPort, internalPorts := range self.portBlocks.externalsToInternals {
+			for _, internalPort := range internalPorts {
+				if _, ok := runningContainers[internalPort]; !ok {
+					externalsPortsToInternalPort[externalPort] = internalPort
+					break
 				}
 			}
 		}
@@ -369,23 +412,31 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 		self.env,
 		self.service,
 		self.block,
-		self.deployedVersion.String(),
+		convertVersionToDocker(self.deployedVersion.String()),
 		time.Now().UnixMilli(),
 	)
 	imageName := fmt.Sprintf(
 		"%s/%s-%s:%s",
-		self.warpState.warpSettings.DockerNamespace,
+		self.warpState.warpSettings.RequireDockerNamespace(),
 		self.env,
 		self.service,
-		self.deployedVersion.String(),
+		convertVersionToDocker(self.deployedVersion.String()),
 	)
 
-	args := []string{}
-	args = append(args, []string{
+	fmt.Printf("Running docker pull %s\n", imageName)
+
+	pullCmd := docker("pull", imageName)
+	err := pullCmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+
+	args := []string{
 		"--name", containerName,
 		"-d",
 		"--restart=on-failure",
-	}...)
+	}
 	for servicePort, internalPort := range servicePortsToInternalPort {
 		args = append(args, []string{"-p", fmt.Sprintf("%d:%d", internalPort, servicePort)}...)
 	}
@@ -457,13 +508,19 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 		args = append(args, fmt.Sprintf("/srv/warp/nginx.conf/%s.conf", self.block))
 	}
 
-	cmd := docker("run", args...)
-	out, err := cmd.Output()
+	fmt.Printf("Running docker %s (%s)\n", strings.Join(args, " "), args)
+
+	runCmd := docker("run", args...)
+
+	fmt.Printf("%s\n", runCmd)
+
+	out, err := runCmd.Output()
+	fmt.Printf("COMMAND OUTPUT %s %s\n", out, err)
 	if err != nil {
 		return "", err
 	}
 	// `docker run` prints the container_id as the only output
-	container_id := string(out)
+	container_id := strings.TrimSpace(string(out))
 	return container_id, nil
 }
 
@@ -477,24 +534,29 @@ func (self *RunWorker) pollContainerStatus(servicePortsToInternalPort map[int]in
 	client := &http.Client{}
 
 	poll := func()(error) {
+		fmt.Printf("POLL ONE http://127.0.0.1:%d/status\n", httpPort)
+
 		statusRequest, err := http.NewRequest(
 			"GET",
-			fmt.Sprintf("http://127.0.0.1:%d", httpPort),
+			fmt.Sprintf("http://127.0.0.1:%d/status", httpPort),
 			nil,
 		)
 		if err != nil {
 			return err
 		}
-		statusRequest.Header.Add("Host", fmt.Sprintf("%s-%s", self.env, self.service))
+		// FIXME pass the domain as an argument to runworker
+		// FIXME pass whether the /status route is exposed to runworker
+		statusRequest.Host = fmt.Sprintf("%s-%s.bringyour.com", self.env, self.service)
 		statusResponse, err := client.Do(statusRequest)
 		if err != nil {
 			return err
 		}
-		var warpStatusResponse WarpStatusResponse
 		body, err := io.ReadAll(statusResponse.Body)
+		fmt.Printf("POLL STATUS %s %s\n", body, err)
 	    if err != nil {
 	    	return err
 	    }
+	    var warpStatusResponse WarpStatusResponse
 		err = json.Unmarshal(body, &warpStatusResponse)
 		if err != nil {
 			return err
@@ -526,24 +588,47 @@ func (self *RunWorker) pollContainerStatus(servicePortsToInternalPort map[int]in
 func (self *RunWorker) redirect(externalsPortsToInternalPort map[int]int) {
 	chainName := self.iptablesChainName()
 
-	cmds := NewCommandList()
+	redirectCmd := func(op string, externalPort int, internalPort int) *exec.Cmd {
+		return sudo(
+	    	"iptables", "-t", "nat", op, chainName,
+	    	"-p", "tcp", "-m", "tcp", "--dport", strconv.Itoa(externalPort),
+	    	"-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
+	    )
+	}
 
-    // remove the rule then insert it back at the end
-    for _, op := range []string{"-D", "-A"} {
-    	for externalPort, internalPort := range externalsPortsToInternalPort {
-		    cmds.sudo(
-		    	"iptables", "-t", "nat", op, chainName,
-		    	"-p", "tcp", "-m", "tcp", "--dport", strconv.Itoa(externalPort),
-		    	"-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
-		    )
+	for externalPort, internalPort := range externalsPortsToInternalPort {
+	    cmd := redirectCmd("-I", externalPort, internalPort)
+	    fmt.Printf("%s\n", cmd)
+	    err := cmd.Run()
+	    if err != nil {
+	    	panic(err)
+	    }
+	}
+
+	// clear all other redirect rules in the owned block
+	for externalPort, internalPort := range externalsPortsToInternalPort {
+		if blockInternalPorts, ok := self.portBlocks.externalsToInternals[externalPort]; ok {
+			for _, blockInternalPort := range blockInternalPorts {
+				if blockInternalPort != internalPort {
+					for {
+						// cmd := redirectCmd("-C", externalPort, blockInternalPort)
+						// fmt.Printf("%d\n", cmd)
+		    			// err := cmd.Run()
+		    			// if err == nil {
+		    			// 	fmt.Printf("REDIRECT RULE DOES NOT EXIST (%s)\n", err)
+		    			// 	break
+		    			// }
+		    			cmd := redirectCmd("-D", externalPort, blockInternalPort)
+		    			err := cmd.Run()
+		    			if err != nil {
+		    				break
+		    			}
+		    			fmt.Printf("%s\n", cmd)
+		    		}
+				}
+			}
 		}
 	}
-	// for efficiency, remove other rules at the front of the chain
-	// FIXME
-	// "iptables -L chainName --line-numbers"
-	// "iptables -t nat -D chainName 1"
-
-	cmds.run()
 }
 
 
@@ -584,23 +669,36 @@ type PortBinding struct {
 
 // map internal port to running container_id for all running containers
 func (self *RunWorker) findRunningContainers() (map[int]string, error) {
-	psCommand := docker("ps", "--format", "{{.ID}}")
-	out, err := psCommand.Output()
+	psCmd := docker("ps", "--format", "{{.ID}}")
+	out, err := psCmd.Output()
 	if err != nil {
+		fmt.Printf("RUNNING CONTAINERS ERROR 1 %s\n", err)
 		return nil, err
 	}
-	containerIds := strings.Split(string(out), "\n")
-	inspectCommand := docker("inspect", containerIds...)
-	out, err = inspectCommand.Output()
+
+	outStr := strings.TrimSpace(string(out))
+	if outStr == "" {
+		// no containers running
+		return map[int]string{}, nil
+	}
+
+	containerIds := strings.Split(outStr, "\n")
+	inspectCmd := docker("inspect", containerIds...)
+	fmt.Printf("RUNNING CONTAINERS INSPECT %s (%s)\n", inspectCmd, containerIds)
+	out, err = inspectCmd.Output()
 	if err != nil {
+		fmt.Printf("RUNNING CONTAINERS ERROR 2 %s\n", err)
 		return nil, err
 	}
 
 	var containerList ContainerList
 	err = json.Unmarshal(out, &containerList)
 	if err != nil {
+		fmt.Printf("RUNNING CONTAINERS ERROR 3 %s\n", err)
 		return nil, err
 	}
+
+	fmt.Printf("RUNNING CONTAINERS LIST %s\n", containerList)
 
 	runningContainers := map[int]string{}
 
@@ -615,6 +713,8 @@ func (self *RunWorker) findRunningContainers() (map[int]string, error) {
 			}
 		}
 	}
+
+	fmt.Printf("RUNNING CONTAINERS %s\n", runningContainers)
 
 	return runningContainers, nil
 }
@@ -823,17 +923,17 @@ func newKillWorker(containerId string) *KillWorker {
 }
 
 func (self *KillWorker) run() {
-	noRestartCommand := docker("update", "--restart=no", self.containerId)
-	err := noRestartCommand.Run()
-	if err != nil {
-		panic(err)
-	}
+	cmds := NewCommandList()
 
-	stopCommand := docker("stop", "container", self.containerId)
-	err = stopCommand.Run()
-	if err != nil {
-		panic(err)
-	}
+	cmds.docker(
+		"update", "--restart=no", self.containerId,
+	).ignoreErrors()
+
+	cmds.docker(
+		"stop", "container", "--time", "120", self.containerId,
+	).ignoreErrors()
+
+	cmds.run()
 }
 
 

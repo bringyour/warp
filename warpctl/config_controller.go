@@ -650,7 +650,7 @@ func NewNginxConfig(env string, envAliases []string) *NginxConfig {
 func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath string) {
     state := getWarpState()
     vaultHome := state.warpSettings.RequireVaultHome()
-    tlsHome := filepath.Join(vaultHome, "tls")
+    // tlsHome := filepath.Join(vaultHome, "tls")
 
     domainSuffix := strings.ReplaceAll(domain, ".", "_")
 
@@ -668,7 +668,7 @@ func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath
         return true
     }
 
-    entries, err := os.ReadDir(tlsHome)
+    entries, err := os.ReadDir(filepath.Join(vaultHome, "tls"))
     if err != nil {
         panic(err)
     }
@@ -676,7 +676,7 @@ func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath
     for _, entry := range entries {
         if entry.IsDir() {
             if version, err := semver.NewVersion(entry.Name()); err == nil {
-                if hasTlsFiles(filepath.Join(tlsHome, entry.Name())) {
+                if hasTlsFiles(filepath.Join(vaultHome, "tls", entry.Name())) {
                     versionDirNames[version] = entry.Name()
                 }
             }
@@ -684,17 +684,17 @@ func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath
     }
 
     versions := maps.Keys(versionDirNames)
-    semver.Sort(versions)
+    semverSortWithBuild(versions)
     if 0 < len(versions) {
         version := versions[len(versions) - 1]
         versionDirName := versionDirNames[version]
-        relativeTlsPemPath = filepath.Join(versionDirName, pemFileName)
-        relativeTlsKeyPath = filepath.Join(versionDirName, keyFileName)
+        relativeTlsPemPath = filepath.Join("tls", versionDirName, keyDirName, pemFileName)
+        relativeTlsKeyPath = filepath.Join("tls", versionDirName, keyDirName, keyFileName)
         return
     }
 
     // no version
-    if hasTlsFiles(tlsHome) {
+    if hasTlsFiles(vaultHome) {
         relativeTlsPemPath = pemFileName
         relativeTlsKeyPath = keyFileName
         return
@@ -987,9 +987,21 @@ func (self *NginxConfig) addLbBlock() {
         self.raw(`
         listen 80;
         server_name {{.lbHostList}};
-        return 301 https://$host$request_uri;
         `, map[string]any{
             "lbHostList": strings.Join(lbHosts, " "),
+        })
+
+        self.block("location =/status", func() {
+            self.raw(`
+            root /srv/warp/status/;
+            add_header Content-Type application/json;
+            `, map[string]any{})
+        })
+
+        self.block("location /", func() {
+            self.raw(`
+            return 301 https://$host$request_uri;
+            `, map[string]any{})
         })
     })
 

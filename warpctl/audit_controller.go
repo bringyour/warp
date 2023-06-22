@@ -40,3 +40,12 @@ func announceRunFail() {
 func announceRunSuccess() {
 
 }
+
+func announceRunEnter() {
+
+}
+
+func announceRunExit() {
+
+}
+

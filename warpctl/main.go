@@ -22,7 +22,7 @@ import (
 )
 
 
-const WARP_VERSION = "1.0.0"
+const WARP_VERSION = "0.0.1"
 
 
 // type CtlArgs struct {

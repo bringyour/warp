@@ -110,8 +110,11 @@ Usage:
     warpctl ls versions [<env> [<service>]]
     warpctl lb list-blocks <env>
     warpctl lb list-hosts <env>
-    warpctl lb create-config <env> [<block>] [--envalias=<envalias>] [--out=<path>]
+    warpctl lb create-config <env> [<block>]
+        [--envalias=<envalias>]
+        [--out=<outdir>]
     warpctl run-local <Makefile> [--envalias=<envalias>]
+    warpctl service ls docker-network <env>
     warpctl service run <env> <service> <block>
         [--rttable=<rttable> --dockernet=<dockernet>]
         [--portblocks=<portblocks>]
@@ -122,10 +125,8 @@ Usage:
         [--status=<status_mode>]
         [--status-prefix=<status_prefix>]
         --domain=<domain>
-    warpctl service create-unit <env> <service> <block>
-        [--target_warp_home=<target_warp_home>]
-        [--target_warpctl=<target_warpctl>]
-    warpctl create-units <env> --outdir=<outdir>
+    warpctl create-units <env> [<service>] [<block>]
+        [--out=<outdir>]
         [--target_warp_home=<target_warp_home>]
         [--target_warpctl=<target_warpctl>]
 
@@ -196,8 +197,6 @@ Options:
     } else if service, _ := opts.Bool("service"); service {
         if run, _ := opts.Bool("run"); run {
             serviceRun(opts)
-        } else if createUnit, _ := opts.Bool("create-unit"); createUnit {
-            serviceCreateUnit(opts)
         }
     } else if createUnits_, _ := opts.Bool("create-units"); createUnits_ {
         createUnits(opts)
@@ -992,13 +991,6 @@ func serviceRun(opts docopt.Opts) {
         statusPrefix: statusPrefix,
     }
     runWorker.Run()
-}
-
-    
-func serviceCreateUnit(opts docopt.Opts) {
-    // for lb, get the routing table from the config file
-
-    // FIXME unit.go
 }
 
 

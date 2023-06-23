@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"net"
 	"runtime"
+	"sync"
+	"time"
 
 	"golang.org/x/exp/slices"
 
@@ -23,7 +25,7 @@ import (
 type CommandList struct {
 	commands []*exec.Cmd
 	ignore map[int]bool
-	dir string
+	Dir string
 }
 
 func NewCommandList() *CommandList {
@@ -33,30 +35,30 @@ func NewCommandList() *CommandList {
 	}
 }
 
-func (self *CommandList) sudo(name string, args ...string) *CommandList {
+func (self *CommandList) Sudo(name string, args ...string) *CommandList {
 	cmd := sudo(name, args...)
-	cmd.Dir = self.dir
+	cmd.Dir = self.Dir
 	self.commands = append(self.commands, cmd)
 	return self
 }
 
-func (self *CommandList) docker(name string, args ...string) *CommandList {
+func (self *CommandList) Docker(name string, args ...string) *CommandList {
 	cmd := docker(name, args...)
-	cmd.Dir = self.dir
+	cmd.Dir = self.Dir
 	self.commands = append(self.commands, cmd)
 	return self
 }
 
-func (self *CommandList) add(cmd *exec.Cmd) *CommandList {
+func (self *CommandList) Add(cmd *exec.Cmd) *CommandList {
 	self.commands = append(self.commands, cmd)
 	return self
 }
 
-func (self *CommandList) ignoreErrors() {
+func (self *CommandList) IgnoreErrors() {
 	self.ignore[len(self.commands) - 1] = true
 }
 
-func (self *CommandList) run() {
+func (self *CommandList) Run() {
 	for i, cmd := range self.commands {
 		fmt.Printf("RUNNING COMMAND %s\n", cmd)
 		err := cmd.Run()
@@ -250,4 +252,42 @@ func semverSortWithBuild(versions []*semver.Version) {
 		return false
 	})
 }
+
+
+type Event struct {
+	mutex sync.Mutex
+	value bool
+	interrupt chan bool
+}
+
+func NewEvent() *Event {
+	return &Event{
+		interrupt: make(chan bool, 0),
+	}
+}
+
+func (self *Event) Set() {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	self.value = true
+	close(self.interrupt)
+}
+
+func (self *Event) IsSet() bool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.value
+}
+
+func (self *Event) WaitForSet(timeout time.Duration) bool {
+	if !self.IsSet() {
+		select {
+		case <- self.interrupt:
+		case <- time.After(timeout):
+		}
+	}
+	return self.IsSet()
+}
+
+
 

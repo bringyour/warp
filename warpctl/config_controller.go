@@ -18,29 +18,46 @@ import (
 
 type ServicesConfig struct {
     Domain string `yaml:"domain,omitempty"`
-    CorsHost string `yaml:"core_host,omitempty"`
     HiddenPrefixes []string `yaml:"hidden_prefixes,omitempty"`
     LbHiddenPrefixes []string `yaml:"lb_hidden_prefixes,omitempty"`
+    TlsWildcard *bool `yaml:"tls_wildcard,omitempty"`
     Versions []*ServicesConfigVersion `yaml:"versions,omitempty"`
 }
 
 
 func (self *ServicesConfig) getHiddenPrefix() string {
-    if 0 < len(self.HiddenPrefixes) {
-        return self.HiddenPrefixes[0]
+    prefixes := self.getHiddenPrefixes()
+    if 0 < len(prefixes) {
+        return prefixes[0]
     }
     return ""
 }
 
+func (self *ServicesConfig) getHiddenPrefixes() []string {
+    return self.HiddenPrefixes
+}
+
 
 func (self *ServicesConfig) getLbHiddenPrefix() string {
-    if 0 < len(self.LbHiddenPrefixes) {
-        return self.LbHiddenPrefixes[0]
-    }
-    if 0 < len(self.HiddenPrefixes) {
-        return self.HiddenPrefixes[0]
+    prefixes := self.getLbHiddenPrefixes()
+    if 0 < len(prefixes) {
+        return prefixes[0]
     }
     return ""
+}
+
+func (self *ServicesConfig) getLbHiddenPrefixes() []string {
+    if 0 < len(self.LbHiddenPrefixes) {
+        return self.LbHiddenPrefixes
+    }
+    return self.HiddenPrefixes
+}
+
+func (self *ServicesConfig) isTlsWildcard() bool {
+    if self.TlsWildcard != nil {
+        return *self.TlsWildcard
+    }
+    return true
 }
 
 
@@ -79,6 +96,8 @@ type LbConfig struct {
 
 
 type ServiceConfig struct {
+    CorsOrigins []string `yaml:"cors_origins,omitempty"`
+    Status string `yaml:"status,omitempty"`
     ExposeAliases []string `yaml:"expose_aliases,omitempty"`
     Exposed *bool `yaml:"exposed,omitempty"`
     LbExposed *bool `yaml:"lb_exposed,omitempty"`
@@ -86,6 +105,13 @@ type ServiceConfig struct {
     Blocks []map[string]int `yaml:"blocks,omitempty"`
     // see https://github.com/go-yaml/yaml/issues/63
     PortConfig `yaml:",inline"`
+}
+
+func (self *ServiceConfig) getStatusMode() string {
+    if self.Status != "" {
+        return self.Status
+    }
+    return "standard"
 }
 
 func (self *ServiceConfig) isExposed() bool {
@@ -96,7 +122,6 @@ func (self *ServiceConfig) isExposed() bool {
 func (self *ServiceConfig) isLbExposed() bool {
     return self.LbExposed == nil || *self.LbExposed
 }
-
 
 func (self *ServiceConfig) includesHost(host string) bool {
     return len(self.Hosts) == 0 || slices.Contains(self.Hosts, host)
@@ -110,6 +135,26 @@ type LbBlock struct {
     ConcurrentClients int `yaml:"concurrent_clients,omitempty"`
     Cores int `yaml:"cores,omitempty"`
     ExternalPorts map[int]int `yaml:"external_ports,omitempty"`
+    RateLimit *RateLimit `yaml:"rate_limit,omitempty"`
+}
+
+func (self *LbBlock) getRateLimit() *RateLimit {
+    if self.RateLimit != nil {
+        return self.RateLimit
+    }
+    // rate defaults
+    return &RateLimit{
+        RequestsPerSecond: 5,
+        Burst: 50,
+        Delay: 25,
+    }
+}
+
+
+type RateLimit struct {
+    RequestsPerSecond int `yaml:"requests_per_second,omitempty"`
+    Burst int `yaml:"burst,omitempty"`
+    Delay int `yaml:"delay,omitempty"`
 }
 
 
@@ -127,7 +172,7 @@ func getServicesConfig(env string) *ServicesConfig {
 
     state := getWarpState()
 
-servicesConfigPath := filepath.Join(
+    servicesConfigPath := filepath.Join(
         state.warpSettings.RequireVaultHome(),
         env,
         "services.yml",
@@ -251,12 +296,13 @@ func (self *PortBlock) eq(service string, block string, port int) bool {
 // port block is external port:service port:internal port range
 func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
     /*
-    # RULES:
-# 1. Once an internal port is associated to a service-block, it can never be associated to another service-block.
-# 2. Each service-block-<serviceport> has a fixed external port that will never change.
-#    If the port is removed from the exteral ports list, that is a config error.
-# 3. An lb-block has a fixed routing table that will never change
-*/
+    RULES:
+    1. Once an internal port is associated to a service-block, it can never be associated to another service-block.
+    2. Each service-block-<serviceport> has a fixed external port that will never change.
+       If the port is removed from the exteral ports list, that is a config error.
+    3. An lb-block has a fixed routing table that will never change
+    4. An internal port can't use a port ever used by as an external; and vice-versa
+    */
 
     servicesConfig := getServicesConfig(env)
 
@@ -336,6 +382,10 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
                 panic("Cannot overwrite the external port of another port block.")
             }
         }
+        if _, ok := assignedInternalPorts[p]; ok {
+            panic("Cannot use an internal port as an external port.")
+        }
+
         assignedExternalPorts[p] = portBlock
 
         portBlock.externalPort = p
@@ -386,6 +436,11 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
                     panic("Cannot overwrite the internal port of another port block.")
                 }
             }
+
+            if _, ok := assignedExternalPorts[p]; ok {
+                panic("Cannot use an external port as an internal port.")
+            }
+
             assignedInternalPorts[p] = portBlock
         }
         portBlock.internalPorts = ps
@@ -576,6 +631,9 @@ func getHostnames(env string, envAliases []string) []string {
 
 
 func isExposed(env string, service string) bool {
+    if service == "lb" {
+        return true
+    }
     servicesConfig := getServicesConfig(env)
     serviceConfig, ok := servicesConfig.Versions[0].Services[service]
     if !ok {
@@ -586,6 +644,9 @@ func isExposed(env string, service string) bool {
 }
 
 func isLbExposed(env string, service string) bool {
+    if service == "lb" {
+        return false
+    }
     servicesConfig := getServicesConfig(env)
     serviceConfig, ok := servicesConfig.Versions[0].Services[service]
     if !ok {
@@ -629,13 +690,19 @@ type NginxConfig struct {
     configParts []string
 }
 
-func NewNginxConfig(env string, envAliases []string) *NginxConfig {
+func NewNginxConfig(env string, envAliases []string) (*NginxConfig, error) {
     servicesConfig := getServicesConfig(env)
 
     // note that all aliases must be covered by the same tls cert as the main domain
-    relativeTlsPemPath, relativeTlsKeyPath := findLatestTls(servicesConfig.Domain)
+    relativeTlsPemPath, relativeTlsKeyPath, err := findLatestTls(
+        servicesConfig.Domain,
+        servicesConfig.isTlsWildcard(),
+    )
+    if err != nil {
+        return nil, err
+    }
 
-    return &NginxConfig{
+    nginxConfig := &NginxConfig{
         env: env,
         envAliases: envAliases,
         servicesConfig: servicesConfig,
@@ -644,19 +711,29 @@ func NewNginxConfig(env string, envAliases []string) *NginxConfig {
         relativeTlsPemPath: relativeTlsPemPath,
         relativeTlsKeyPath: relativeTlsKeyPath,
     }
+    return nginxConfig, nil
 }
 
 
-func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath string) {
+func findLatestTls(domain string, wildcard bool) (relativeTlsPemPath string, relativeTlsKeyPath string, err error) {
     state := getWarpState()
     vaultHome := state.warpSettings.RequireVaultHome()
     // tlsHome := filepath.Join(vaultHome, "tls")
 
-    domainSuffix := strings.ReplaceAll(domain, ".", "_")
+    // domainSuffix := strings.ReplaceAll(domain, ".", "_")
 
-    keyDirName := fmt.Sprintf("star_%s", domainSuffix)
-    pemFileName := fmt.Sprintf("star_%s.pem", domainSuffix)
-    keyFileName := fmt.Sprintf("star_%s.key", domainSuffix)
+    var keyDirName string
+    var pemFileName string
+    var keyFileName string
+    if wildcard {
+        keyDirName = fmt.Sprintf("star.%s", domain)
+        pemFileName = fmt.Sprintf("star.%s.pem", domain)
+        keyFileName = fmt.Sprintf("star.%s.key", domain)
+    } else {
+        keyDirName = domain
+        pemFileName = fmt.Sprintf("%s.pem", domain)
+        keyFileName = fmt.Sprintf("%s.key", domain)
+    }
 
     hasTlsFiles := func(dirPath string)(bool) {
         fmt.Printf("TLS SEARCHING %s\n", dirPath)
@@ -700,7 +777,8 @@ func findLatestTls(domain string) (relativeTlsPemPath string, relativeTlsKeyPath
         return
     }
 
-    panic(fmt.Sprintf("TLS files %s and %s not found.", pemFileName, keyFileName))
+    err = errors.New(fmt.Sprintf("TLS files %s and %s not found.", pemFileName, keyFileName))
+    return
 }
 
 
@@ -734,7 +812,7 @@ func (self *NginxConfig) block(tag string, body func()) {
 }
 
 // lb block -> config
-func (self *NginxConfig) generate() map[string]string {
+func (self *NginxConfig) Generate() map[string]string {
     blockConfigs := map[string]string{}
 
     for block, blockInfo := range self.blockInfos["lb"] {
@@ -833,20 +911,28 @@ func (self *NginxConfig) addNginxConfig() {
         self.addUpstreamBlocks()
 
         // rate limiters
+        rateLimit := self.lbBlockInfo.lbBlock.getRateLimit()
         self.raw(`
         # see https://www.nginx.com/blog/rate-limiting-nginx/
-        limit_req_zone $binary_remote_addr zone=standardlimit:128m rate=5r/s;
-        `)
+        limit_req_zone $binary_remote_addr zone=standardlimit:128m rate={{.requestsPerSecond}}r/s;
+        limit_req zone=standardlimit burst={{.burst}} delay={{.delay}};
+        `, map[string]any{
+            "requestsPerSecond": rateLimit.RequestsPerSecond,
+            "burst": rateLimit.Burst,
+            "delay": rateLimit.Delay,
+        })
 
         self.block("server", func() {
             self.raw(`
             listen 80 default_server;
             server_name _;
-
-            location / {
-                deny all;
-            }
             `)
+
+            self.block("location /", func() {
+                self.raw(`
+                deny all;
+                `)
+            })
         })
 
         self.addLbBlock()
@@ -942,16 +1028,6 @@ func (self *NginxConfig) addUpstreamBlocks() {
 
 
 func (self *NginxConfig) addLbBlock() {
-    var rootPrefix string
-    lbHiddenPrefix := self.servicesConfig.getLbHiddenPrefix()
-    if lbHiddenPrefix == "" {
-        rootPrefix = ""
-    } else {
-        rootPrefix = fmt.Sprintf("/%s", lbHiddenPrefix)
-    }
-
-    
-
     lbHosts := []string{}
 
     lbHost := fmt.Sprintf("%s-lb.%s", self.env, self.servicesConfig.Domain)
@@ -991,17 +1067,27 @@ func (self *NginxConfig) addLbBlock() {
             "lbHostList": strings.Join(lbHosts, " "),
         })
 
-        self.block("location =/status", func() {
-            self.raw(`
-            root /srv/warp/status/;
-            add_header Content-Type application/json;
-            `, map[string]any{})
-        })
+        // the run controller expects services to expose /status on http
+        for _, routePrefix := range self.getLbRoutePrefixes() {
+            statusLocation := templateString(
+                "location ={{.routePrefix}}/status",
+                map[string]any{
+                    "routePrefix": routePrefix,
+                },
+            )
+
+            self.block(statusLocation, func() {
+                self.raw(`
+                alias /srv/warp/status/status.json;
+                add_header Content-Type application/json;
+                `)
+            })
+        }
 
         self.block("location /", func() {
             self.raw(`
             return 301 https://$host$request_uri;
-            `, map[string]any{})
+            `)
         })
     })
 
@@ -1017,12 +1103,21 @@ func (self *NginxConfig) addLbBlock() {
             "relativeTlsKeyPath": self.relativeTlsKeyPath,
         })
 
-        self.block("location =/status", func() {
-            self.raw(`
-            root /srv/warp/status/;
-            add_header Content-Type application/json;
-            `, map[string]any{})
-        })
+        for _, routePrefix := range self.getLbRoutePrefixes() {
+            statusLocation := templateString(
+                "location ={{.routePrefix}}/status",
+                map[string]any{
+                    "routePrefix": routePrefix,
+                },
+            )
+
+            self.block(statusLocation, func() {
+                self.raw(`
+                alias /srv/warp/status/status.json;
+                add_header Content-Type application/json;
+                `)
+            })
+        }
 
         // /by/service/{service}/
         // /by/b/{service}/{name}/
@@ -1037,64 +1132,57 @@ func (self *NginxConfig) addLbBlock() {
 
             serviceHost := fmt.Sprintf("%s-%s.%s", self.env, service, self.servicesConfig.Domain)
 
-            location := templateString(
-                `location {{.rootPrefix}}/by/service/{{.service}}/`,
-                map[string]any{
-                    "rootPrefix": rootPrefix,
-                    "service": service,
-                },
-            )
-
-            self.block(location, func() {
-                self.raw(`
-                limit_req zone=standardlimit burst=50 delay=25;
-                proxy_pass http://service-block-{{.service}}/;
-                proxy_set_header X-Forwarded-For $remote_addr;
-                proxy_set_header Host {{.serviceHost}};
-                `, map[string]any{
-                    "service": service,
-                    "serviceHost": serviceHost,
-                })
-            })
-            
-            for _, block := range blocks {
-                blockLocation := templateString(
-                    `location {{.rootPrefix}}/by/b/{{.service}}/{{.block}}/`,
+            for _, routePrefix := range self.getLbRoutePrefixes() {
+                location := templateString(
+                    `location {{.routePrefix}}/by/service/{{.service}}/`,
                     map[string]any{
-                        "rootPrefix": rootPrefix,
+                        "routePrefix": routePrefix,
                         "service": service,
-                        "block": block,
                     },
                 )
 
-                self.block(blockLocation, func() {
+                self.block(location, func() {
                     self.raw(`
-                    limit_req zone=standardlimit burst=50 delay=25;
-                    proxy_pass http://service-block-{{.service}}-{{.block}}/;
+                    proxy_pass http://service-block-{{.service}}/;
                     proxy_set_header X-Forwarded-For $remote_addr;
                     proxy_set_header Host {{.serviceHost}};
                     `, map[string]any{
                         "service": service,
-                        "block": block,
                         "serviceHost": serviceHost,
                     })
                 })
+                
+                for _, block := range blocks {
+                    blockLocation := templateString(
+                        `location {{.routePrefix}}/by/b/{{.service}}/{{.block}}/`,
+                        map[string]any{
+                            "routePrefix": routePrefix,
+                            "service": service,
+                            "block": block,
+                        },
+                    )
+
+                    self.block(blockLocation, func() {
+                        self.raw(`
+                        proxy_pass http://service-block-{{.service}}-{{.block}}/;
+                        proxy_set_header X-Forwarded-For $remote_addr;
+                        proxy_set_header Host {{.serviceHost}};
+                        `, map[string]any{
+                            "service": service,
+                            "block": block,
+                            "serviceHost": serviceHost,
+                        })
+                    })
+                }
             }
         }
     })
 }
 
 func (self *NginxConfig) addServiceBlocks() {
-    var rootPrefix string
-    hiddenPrefix := self.servicesConfig.getHiddenPrefix()
-    if hiddenPrefix == "" {
-        rootPrefix = ""
-    } else {
-        rootPrefix = fmt.Sprintf("/%s", hiddenPrefix)
-    }
-
     for _, service := range self.services() {
-        if !self.servicesConfig.Versions[0].Services[service].isExposed() {
+        serviceConfig := self.servicesConfig.Versions[0].Services[service]
+        if !serviceConfig.isExposed() {
             continue
         }
 
@@ -1108,7 +1196,7 @@ func (self *NginxConfig) addServiceBlocks() {
             serviceHosts = append(serviceHosts, serviceHostAlias)
         }
 
-        for _, serviceHostAlias := range self.servicesConfig.Versions[0].Services[service].ExposeAliases {
+        for _, serviceHostAlias := range serviceConfig.ExposeAliases {
             serviceHosts = append(serviceHosts, serviceHostAlias)
         }
 
@@ -1128,51 +1216,106 @@ func (self *NginxConfig) addServiceBlocks() {
             server_name {{.serviceHostList}};
             ssl_certificate     /srv/warp/vault/{{.relativeTlsPemPath}};
             ssl_certificate_key /srv/warp/vault/{{.relativeTlsKeyPath}};
-
-            location {{.rootPrefix}}/ {
-                limit_req zone=standardlimit burst=50 delay=25;
-                proxy_pass http://service-block-{{.service}}/;
-                proxy_set_header X-Forwarded-For $remote_addr;
-
-                # see https://enable-cors.org/server_nginx.html
-                if ($request_method = 'OPTIONS') {
-                    add_header 'Access-Control-Allow-Origin' 'https://{{.corsHost}}';
-                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
-                    #
-                    # Custom headers and headers various browsers *should* be OK with but aren't
-                    #
-                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version';
-                    #
-                    # Tell client that this pre-flight info is valid for 20 days
-                    #
-                    add_header 'Access-Control-Max-Age' 1728000;
-                    add_header 'Content-Type' 'text/plain; charset=utf-8';
-                    add_header 'Content-Length' 0;
-                    return 204;
-                 }
-                 if ($request_method = 'POST') {
-                    add_header 'Access-Control-Allow-Origin' 'https://{{.corsHost}}' always;
-                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
-                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
-                 }
-                 if ($request_method = 'GET') {
-                    add_header 'Access-Control-Allow-Origin' 'https://{{.corsHost}}' always;
-                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
-                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
-                 }
-            }
             `, map[string]any{
                 "serviceHostList": strings.Join(serviceHosts, " "),
                 "relativeTlsPemPath": self.relativeTlsPemPath,
                 "relativeTlsKeyPath": self.relativeTlsKeyPath,
-                "rootPrefix": rootPrefix,
-                "service": service,
-                "corsHost": self.servicesConfig.CorsHost,
             })
+
+            for _, routePrefix := range self.getRoutePrefixes() {
+                statusLocation := templateString(
+                    "location ={{.routePrefix}}/status",
+                    map[string]any{
+                        "routePrefix": routePrefix,
+                    },
+                )
+
+                self.block(statusLocation, func() {
+                    self.raw(`
+                    deny all;
+                    `)
+                })
+
+                location := templateString(
+                    "location {{.routePrefix}}/",
+                    map[string]any{
+                        "routePrefix": routePrefix,
+                    },
+                )
+
+                self.block(location, func() {
+                    self.raw(`
+                    proxy_pass http://service-block-{{.service}}/;
+                    proxy_set_header X-Forwarded-For $remote_addr;
+                    `, map[string]any{
+                        "service": service,
+                    })
+
+                    // apply cors policies
+                    if 0 < len(serviceConfig.CorsOrigins) {
+                        self.raw(`
+                        # see https://enable-cors.org/server_nginx.html
+                        if ($request_method = 'OPTIONS') {
+                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}';
+                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+                            #
+                            # Custom headers and headers various browsers *should* be OK with but aren't
+                            #
+                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version';
+                            #
+                            # Tell client that this pre-flight info is valid for 20 days
+                            #
+                            add_header 'Access-Control-Max-Age' 1728000;
+                            add_header 'Content-Type' 'text/plain; charset=utf-8';
+                            add_header 'Content-Length' 0;
+                            return 204;
+                         }
+                         if ($request_method = 'POST') {
+                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}' always;
+                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
+                            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                         }
+                         if ($request_method = 'GET') {
+                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}' always;
+                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
+                            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                         }
+                        `, map[string]any{
+                            // use space separated multiple origins
+                            "corsOrigins": strings.Join(serviceConfig.CorsOrigins, " "),
+                        })
+                    }
+                })
+            }
         })
     }
+}
+
+
+func (self *NginxConfig) getLbRoutePrefixes() []string {
+    routePrefixes := []string{}
+    for _, prefix := range self.servicesConfig.getLbHiddenPrefixes() {
+        routePrefix := fmt.Sprintf("/%s", prefix)
+        routePrefixes = append(routePrefixes, routePrefix)
+    }
+    if len(routePrefixes) == 0 {
+        routePrefixes = append(routePrefixes, "")
+    }
+    return routePrefixes
+}
+
+func (self *NginxConfig) getRoutePrefixes() []string {
+    routePrefixes := []string{}
+    for _, prefix := range self.servicesConfig.getHiddenPrefixes() {
+        routePrefix := fmt.Sprintf("/%s", prefix)
+        routePrefixes = append(routePrefixes, routePrefix)
+    }
+    if len(routePrefixes) == 0 {
+        routePrefixes = append(routePrefixes, "")
+    }
+    return routePrefixes
 }
 
 
@@ -1200,8 +1343,19 @@ func NewSystemdUnits(env string, targetWarpHome string, targetWarpctl string) *S
     }
 }
 
-// service -> block -> unit
-func (self *SystemdUnits) generate() map[string]map[string]string {
+// host -> service -> block -> unit
+func (self *SystemdUnits) Generate() map[string]map[string]map[string]string {
+    hosts := maps.Keys(self.servicesConfig.Versions[0].Lb.Interfaces)
+
+    hostsServicesUnits := map[string]map[string]map[string]string{}
+    for _, host := range hosts {
+        hostsServicesUnits[host] = self.generateForHost(host)
+    }
+
+    return hostsServicesUnits
+}
+
+func (self *SystemdUnits) generateForHost(host string) map[string]map[string]string {
 
     /*
     warpctl service run <env> <service> <block>
@@ -1258,14 +1412,15 @@ ProtectSystem=true
 ReadWriteDirectories=-/etc/redis
 */
 
-
-
     servicesUnits := map[string]map[string]string{}
-
 
     // generate lb
     lbUnits := map[string]string{}
     for block, blockInfo := range self.blockInfos["lb"] {
+        if blockInfo.host != host {
+            continue
+        }
+
         parts := []string{}
         // parts = append(parts, fmt.Sprintf(`WARP_HOME="%s"`, self.targetWarpHome))
 
@@ -1320,6 +1475,17 @@ ReadWriteDirectories=-/etc/redis
         parts = append(parts, fmt.Sprintf("--mount_vault=%s", vaultMode))
         parts = append(parts, fmt.Sprintf("--mount_config=%s", configMode))
         parts = append(parts, fmt.Sprintf("--mount_site=%s", siteMode))
+        
+        statusMode := "standard"
+
+        parts = append(parts, fmt.Sprintf("--status=%s", statusMode))
+        // status are only exposed via the lb using the lb routes
+        lbHiddenPrefix := self.servicesConfig.getLbHiddenPrefix()
+        if lbHiddenPrefix != "" {
+            parts = append(parts, fmt.Sprintf("--status-prefix=/%s", lbHiddenPrefix))
+        }
+
+        parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
 
         lbUnits[block] = self.unit("lb", block, parts)
     }
@@ -1351,6 +1517,12 @@ ReadWriteDirectories=-/etc/redis
         parts = append(parts, fmt.Sprintf("--mount_config=%s", configMode))
         parts = append(parts, fmt.Sprintf("--mount_site=%s", siteMode))
 
+        statusMode := "no"
+        
+        parts = append(parts, fmt.Sprintf("--status=%s", statusMode))
+
+        parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
+
         configUpdaterUnits[block] = self.unit("config-updater", block, parts)
     }
     servicesUnits["config-updater"] = configUpdaterUnits
@@ -1359,6 +1531,12 @@ ReadWriteDirectories=-/etc/redis
     for service, serviceBlockInfos := range self.blockInfos {
         switch service {
         case "lb", "config-updater":
+            continue
+        }
+
+        serviceConfig := self.servicesConfig.Versions[0].Services[service]
+
+        if !serviceConfig.includesHost(host) {
             continue
         }
 
@@ -1401,6 +1579,12 @@ ReadWriteDirectories=-/etc/redis
             parts = append(parts, fmt.Sprintf("--mount_vault=%s", vaultMode))
             parts = append(parts, fmt.Sprintf("--mount_config=%s", configMode))
             parts = append(parts, fmt.Sprintf("--mount_site=%s", siteMode))
+
+            statusMode := serviceConfig.getStatusMode()
+        
+            parts = append(parts, fmt.Sprintf("--status=%s", statusMode))
+
+            parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
 
             serviceUnits[block] = self.unit(service, block, parts)
         }

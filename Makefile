@@ -19,4 +19,4 @@ local_lb:
 	trap "$(MAKE) local_routing_off" EXIT && $(MAKE) run_local_lb
 
 run_local_lb:
-	warpctl runlocal lb/Makefile --envalias=${HOST}
+	warpctl run-local lb/Makefile --envalias=${HOST}

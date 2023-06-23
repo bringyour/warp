@@ -26,11 +26,12 @@ RUN apt-get update && apt-get install -y \
 
 # RUN rm -rf /var/lib/apt/sources.list.d/*
 
-RUN openssl dhparam -dsaparam -out /etc/nginx/dhparam.pem 4096
-
+# print the nginx version
 RUN nginx -V
 
-COPY build/${WARP_ENV}/status /srv/warp/status/status
+RUN openssl dhparam -dsaparam -out /etc/nginx/dhparam.pem 4096
+
+COPY build/${WARP_ENV}/status.json /srv/warp/status/status.json
 
 ADD build/${WARP_ENV}/nginx.conf /srv/warp/nginx.conf
 EXPOSE 80

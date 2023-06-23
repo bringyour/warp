@@ -3,8 +3,6 @@
 # this must be done for wildcard certs of the domain which cover only one level
 
 domain: bringyour.com
-# if defined, this is the url of the web app
-cors_host: bringyour.com
 hidden_prefixes:
     - callused-bronchus-eastern-quinine
     - formosa-eat-rookie-trow
@@ -12,6 +10,8 @@ hidden_prefixes:
 lb_hidden_prefixes:
     - virgo-arkansas-mao-zircon
     - breaker-gawk-sanskrit-mudd
+# if false, the tls dir is named `domain` and must have SAN of each host
+# tls_wildcard: true
 
 versions:
 # append new versions to the top
@@ -23,6 +23,7 @@ versions:
 # 2. Each service-block-<serviceport> has a fixed external port that will never change.
 #    If the port is removed from the exteral ports list, that is a config error.
 # 3. An lb-block has a fixed routing table that will never change 
+# 4. An internal port can't use a port ever used by as an external; and vice-versa
 -   external_ports: 80,443,7000-7200
     internal_ports: 7201-9000
     routing_tables: 100-120
@@ -45,8 +46,18 @@ versions:
                         # <externalport>: <port> forces an external port
                         80: 80
                         443: 443
+                    # this follows the convention at http://nginx.org/en/docs/http/ngx_http_limit_req_module.html#limit_req
+                    # rate_limit:
+                    #     requests_per_second: 5
+                    #     burst: 50
+                    #     delay: 25
     services:
         web:
+            # if defined, this is the url of the web app
+            cors_origins:
+                - https://bringyour.com
+            # set to no if this service does not have a standard /status route
+            # status: no
             # expose these hostnames as aliases for the service.
             # The aliases must be covered by the same tls cert as the domain
             # expose_aliases:

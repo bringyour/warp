@@ -15,13 +15,13 @@ import (
     "net"
     "net/http"
     "regexp"
-    "context"
+    // "context"
     "sync"
     "bytes"
     "strings"
 
     "golang.org/x/exp/maps"
-	"golang.org/x/sync/semaphore"
+	// "golang.org/x/sync/semaphore"
 
     "github.com/coreos/go-semver/semver"
 )
@@ -487,7 +487,12 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
 
 func pollStatusUntil(env string, service string, sampleCount int, statusUrls []string, targetVersion string) {
 	for {
+		fmt.Printf("POLL STATUS UNTIL %s -> %s\n", statusUrls, targetVersion)
+
         statusVersions := sampleStatusVersions(20, statusUrls)
+
+        fmt.Printf("POLL STATUS SAMPLED VERSIONS %s\n", statusVersions)
+
 
         serviceCount := 0
         serviceVersions := []*semver.Version{}
@@ -594,7 +599,7 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 		}
 	}
 
-	sample := func(sem *semaphore.Weighted, statusUrl string) {
+	sample := func(statusUrl string, complete chan string) {
 		// do not use connection re-use or keep alives
 		// each request should be a new connection
 		httpClient := &http.Client{
@@ -648,16 +653,18 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 		for i := 0; i < sampleCount; i += 1 {
 			addResults(sampleOne())
 		}
-		sem.Release(1)
+
+		complete <- statusUrl
 	}
 
 
-	sem := semaphore.NewWeighted(0)
+	complete := make(chan string, len(statusUrls))
 	for _, statusUrl := range statusUrls {
-		go sample(sem, statusUrl)
+		go sample(statusUrl, complete)
 	}
-
-	sem.Acquire(context.Background(), int64(len(statusUrls)))
+	for range statusUrls {
+		<- complete
+	}
 
 	return &StatusVersions{
 		versions: versions,
@@ -668,101 +675,97 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 
 
 func pollLbBlockStatusUntil(env string, service string, blocks []string, targetVersion string) {
-	if !isLbExposed(env, service) {
-		// the service is not externally exposed
-		return
-	}
+	// TODO for lb, if the service config mapped each interface to a public ip, 
+	// TODO then we could reach individual blocks via a http+ip+host header
+	if service != "lb" {
+		if !isLbExposed(env, service) {
+			// the service is not externally exposed
+			return
+		}
 
-	domain := getDomain(env)
-	hiddenPrefix := getLbHiddenPrefix(env)
+		domain := getDomain(env)
+		hiddenPrefix := getLbHiddenPrefix(env)
 
-    blockStatusUrls := []string{}
-    for _, block := range blocks {
-    	var blockStatusUrl string
-    	if hiddenPrefix == "" {
-	        blockStatusUrl = fmt.Sprintf(
-	        	"%s-lb.%s/by/b/%s/%s/status",
-	        	env,
-	        	domain,
-	        	service,
-	        	block,
-	        )
-	    } else {
-	    	blockStatusUrl = fmt.Sprintf(
-	        	"%s-lb.%s/%s/by/b/%s/%s/status",
-	        	env,
-	        	domain,
-	        	hiddenPrefix,
-	        	service,
-	        	block,
-	        )
+	    blockStatusUrls := []string{}
+	    for _, block := range blocks {
+	    	var blockStatusUrl string
+	    	if hiddenPrefix == "" {
+		        blockStatusUrl = fmt.Sprintf(
+		        	"https://%s-lb.%s/by/b/%s/%s/status",
+		        	env,
+		        	domain,
+		        	service,
+		        	block,
+		        )
+		    } else {
+		    	blockStatusUrl = fmt.Sprintf(
+		        	"https://%s-lb.%s/%s/by/b/%s/%s/status",
+		        	env,
+		        	domain,
+		        	hiddenPrefix,
+		        	service,
+		        	block,
+		        )
+		    }
+	        blockStatusUrls = append(blockStatusUrls, blockStatusUrl)
 	    }
-        blockStatusUrls = append(blockStatusUrls, blockStatusUrl)
-    }
 
-    pollStatusUntil(env, service, 20, blockStatusUrls, targetVersion)
+	    pollStatusUntil(env, service, 20, blockStatusUrls, targetVersion)
+	}
 }
 
 
 func pollLbServiceStatusUntil(env string, service string, targetVersion string) {
-	if !isLbExposed(env, service) {
-		// the service is not externally exposed
-		return
-	}
+	if service == "lb" {
+		domain := getDomain(env)
+		hiddenPrefix := getLbHiddenPrefix(env)
 
-	domain := getDomain(env)
-	hiddenPrefix := getLbHiddenPrefix(env)
+		var serviceStatusUrl string
+		if hiddenPrefix == "" {
+			serviceStatusUrl = fmt.Sprintf(
+				"https://%s-lb.%s/status",
+				env,
+				domain,
+			)
+		} else {
+			serviceStatusUrl = fmt.Sprintf(
+				"https://%s-lb.%s/%s/status",
+				env,
+				domain,
+				hiddenPrefix,
+			)
+		}
 
-	var serviceStatusUrl string
-	if hiddenPrefix == "" {
-		serviceStatusUrl = fmt.Sprintf(
-			"%s-lb.%s/by/service/%s/status",
-			env,
-			domain,
-			service,
-		)
+	    pollStatusUntil(env, service, 20, []string{serviceStatusUrl}, targetVersion)
 	} else {
-		serviceStatusUrl = fmt.Sprintf(
-			"%s-lb.%s/%s/by/service/%s/status",
-			env,
-			domain,
-			hiddenPrefix,
-			service,
-		)
+		if !isLbExposed(env, service) {
+			// the service is not externally exposed
+			return
+		}
+
+		domain := getDomain(env)
+		hiddenPrefix := getLbHiddenPrefix(env)
+
+		var serviceStatusUrl string
+		if hiddenPrefix == "" {
+			serviceStatusUrl = fmt.Sprintf(
+				"https://%s-lb.%s/by/service/%s/status",
+				env,
+				domain,
+				service,
+			)
+		} else {
+			serviceStatusUrl = fmt.Sprintf(
+				"https://%s-lb.%s/%s/by/service/%s/status",
+				env,
+				domain,
+				hiddenPrefix,
+				service,
+			)
+		}
+
+	    pollStatusUntil(env, service, 20, []string{serviceStatusUrl}, targetVersion)
 	}
-
-    pollStatusUntil(env, service, 20, []string{serviceStatusUrl}, targetVersion)
-}
-
-
-func pollServiceStatusUntil(env string, service string, targetVersion string) {
-	if !isExposed(env, service) {
-		// the service is not externally exposed
-		return
-	}
-
-	domain := getDomain(env)
-	hiddenPrefix := getHiddenPrefix(env)
-
-	var serviceStatusUrl string
-	if hiddenPrefix == "" {
-		serviceStatusUrl = fmt.Sprintf(
-			"%s-%s.%s/status",
-			env,
-			service,
-			domain,
-		)
-	} else {
-		serviceStatusUrl = fmt.Sprintf(
-			"%s-%s.%s/%s/status",
-			env,
-			service,
-			domain,
-			hiddenPrefix,
-		)
-	}
-
-    pollStatusUntil(env, service, 20, []string{serviceStatusUrl}, targetVersion)
 }
 
 

@@ -10,7 +10,7 @@ build:
 	for block in `warpctl lb list-blocks ${WARP_ENV}`; do \
 		warpctl lb create-config ${WARP_ENV} $${block} --out="build/${WARP_ENV}/nginx.conf/$${block}.conf"; \
 	done
-	echo "{\"version\":\"${WARP_VERSION}\",\"status\":\"ok\"}" > build/${WARP_ENV}/status
+	echo "{\"version\":\"${WARP_VERSION}\",\"status\":\"ok\"}" > build/${WARP_ENV}/status.json
 
 image:
 	# --no-cache to always regenerate the encryption data

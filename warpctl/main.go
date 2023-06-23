@@ -125,10 +125,13 @@ Usage:
         [--status=<status_mode>]
         [--status-prefix=<status_prefix>]
         --domain=<domain>
-    warpctl create-units <env> [<service>] [<block>]
+    warpctl service drain <env> <service> <block>
+        [--portblocks=<portblocks>]
+    warpctl service create-units <env> [<service>] [<block>]]
         [--out=<outdir>]
         [--target_warp_home=<target_warp_home>]
         [--target_warpctl=<target_warpctl>]
+    warpctl service [down | up] <env> [<service> [<block>]]
 
 Options:
     -h --help                  Show this screen.
@@ -197,9 +200,9 @@ Options:
     } else if service, _ := opts.Bool("service"); service {
         if run, _ := opts.Bool("run"); run {
             serviceRun(opts)
+        } else if createUnits_, _ := opts.Bool("create-units"); createUnits_ {
+            createUnits(opts)
         }
-    } else if createUnits_, _ := opts.Bool("create-units"); createUnits_ {
-        createUnits(opts)
     }
 }
 
@@ -994,6 +997,7 @@ func serviceRun(opts docopt.Opts) {
 }
 
 
+// FIXME create units called <service>-cleanup that run once and run when bringing services down to cleanup running dockers on that portlist
 // FIXME run should set common env vars
 // WARP_HOME
 func createUnits(opts docopt.Opts) {

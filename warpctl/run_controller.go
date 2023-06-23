@@ -618,8 +618,14 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 		return "", err
 	}
 	// `docker run` prints the container_id as the only output
-	container_id := strings.TrimSpace(string(out))
-	return container_id, nil
+	containerId := strings.TrimSpace(string(out))
+
+	if self.dockerNetwork != nil {
+		// connect to the services network
+		docker("network", "connect",  self.servicesDockerNetwork.networkName, containerId)
+	}
+
+	return containerId, nil
 }
 
 func (self *RunWorker) pollContainerStatus(servicePortsToInternalPort map[int]int, timeout time.Duration) error {

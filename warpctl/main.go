@@ -127,10 +127,10 @@ Usage:
         --domain=<domain>
     warpctl service drain <env> <service> <block>
         [--portblocks=<portblocks>]
-    warpctl service create-units <env> [<service>] [<block>]]
-        [--out=<outdir>]
+    warpctl service create-units <env> [<service> [<block>]]
         [--target_warp_home=<target_warp_home>]
         [--target_warpctl=<target_warpctl>]
+        [--out=<outdir>]
     warpctl service [down | up] <env> [<service> [<block>]]
 
 Options:
@@ -997,26 +997,109 @@ func serviceRun(opts docopt.Opts) {
 }
 
 
-// FIXME create units called <service>-cleanup that run once and run when bringing services down to cleanup running dockers on that portlist
-// FIXME run should set common env vars
-// WARP_HOME
 func createUnits(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
 
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
+    var filterService string
+    if service, err := opts.String("<service>"); err == nil {
+        filterService = service
+    } else {
+        filterService = ""
     }
 
-    // FIXME target warp home
-    
-    systemdUnits := NewSystemdUnits(env, "/srv/warp", "/usr/local/bin/warpctl")
+    var filterBlock string
+    if block, err := opts.String("<block>"); err == nil {
+        filterBlock = block
+    } else {
+        filterBlock = ""
+    }
+
+    var targetWarpHome string
+    if path, err := opts.String("--target_warp_home"); err == nil {
+        targetWarpHome = path
+    } else {
+        targetWarpHome = "/srv/warp"
+    }
+
+    var targetWarpctl string
+    if path, err := opts.String("--target_warpctl"); err == nil {
+        targetWarpctl = path
+    } else {
+        targetWarpctl = "/usr/local/bin/warpctl"
+    }
+
+    var outDir string
+    if path, err := opts.String("--out"); err == nil {
+        outDir = path
+    } else {
+        outDir = ""
+    }
+
+    systemdUnits := NewSystemdUnits(
+        env,
+        targetWarpHome,
+        targetWarpctl,
+    )
     hostsServicesUnits := systemdUnits.Generate()
 
+
+    out := func(host string, service string, block string, unit string) {
+        if outDir == "" {
+            fmt.Println(templateString(`
+            # host: {{.host}}
+            # service: {{.service}}
+            # block: {{.block}}
+
+            {{.unit}}
+
+
+            `, map[string]any {
+                "host": host,
+                "service": service,
+                "block": block,
+                "unit": unit,
+            }))
+        } else {
+            // write to file
+            // <dir>/<host>/warp-<env>-<service>-<block>.service
+            hostDir := path.Join(outDir, host)
+            os.MkdirAll(hostDir, 0644)
+            unitFileName := fmt.Sprintf("warp-%s-%s-%s.service", env, service, block)
+            os.WriteFile(
+                path.Join(hostDir, unitFileName),
+                []byte(unit),
+                0644,
+            )
+        }
+    }
+
+
+    includesService := func(service string)(bool) {
+        if filterService == "" {
+            return true
+        }
+        return filterService == service
+    }
+
+    includesBlock := func(block string)(bool) {
+        if filterBlock == "" {
+            return true
+        }
+        return filterBlock == block
+    }
+
     for host, servicesUnits := range hostsServicesUnits {
-        fmt.Printf("#\n# %s\n#\n\n", host)
         for service, serviceUnits := range servicesUnits {
-            for block, unit := range serviceUnits {
-                fmt.Printf("#\n# %s-%s block %s\n#\n\n%s\n\n", env, service, block, unit)
+            if !includesService(service) {
+                continue
+            }
+            for block, units := range serviceUnits {
+                if !includesBlock(block) {
+                    continue
+                }
+
+                out(host, service, block, units.serviceUnit)
+                // FIXME drain unit
             }
         }
     }

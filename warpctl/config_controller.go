@@ -1344,10 +1344,10 @@ func NewSystemdUnits(env string, targetWarpHome string, targetWarpctl string) *S
 }
 
 // host -> service -> block -> unit
-func (self *SystemdUnits) Generate() map[string]map[string]map[string]string {
+func (self *SystemdUnits) Generate() map[string]map[string]map[string]*Units {
     hosts := maps.Keys(self.servicesConfig.Versions[0].Lb.Interfaces)
 
-    hostsServicesUnits := map[string]map[string]map[string]string{}
+    hostsServicesUnits := map[string]map[string]map[string]*Units{}
     for _, host := range hosts {
         hostsServicesUnits[host] = self.generateForHost(host)
     }
@@ -1355,67 +1355,19 @@ func (self *SystemdUnits) Generate() map[string]map[string]map[string]string {
     return hostsServicesUnits
 }
 
-func (self *SystemdUnits) generateForHost(host string) map[string]map[string]string {
 
-    /*
-    warpctl service run <env> <service> <block>
-        [--rttable=<rttable> --dockernet=<dockernet>]
-        [--portblocks=<portblocks>]
-        --services_dockernet=<services_dockernet>
-        [--mount_vault=<mount_vault_mode>]
-        [--mount_config=<mount_config_mode>]
-        [--mount_site=<mount_site_mode>]
-    */
+type Units struct {
+    serviceUnit string
+    drainUnit string
+}
 
-    /*
-[Unit]
-Description=Warpctl service <service> block <block>
-Requires=network.target
-After=network.target
-Requires=docker.service
-After=docker.service
-ReloadPropagatedFrom=network.target docker.service
-
-[Service]
-Type=simple
-Environment="WARP_HOME=<warphome>"
-ExecStart=<warpctl> ....
-ExecStop=/bin/kill -s TERM $MAINPID
-TimeoutStopSec=0
-Restart=always
-StandardOutput=file:/var/log/warp/<service>-<block>.out
-StandardError=file:/var/log/warp/<service>-<block>.err
-
-[Install]
-WantedBy=multi-user.target
-Alias=redis.service
-*/
-
-// FIXME hardening
-/*
-
-ReadWriteDirectories=-/var/lib/redis
-ReadWriteDirectories=-/var/log/redis
-ReadWriteDirectories=-/run/redis
-
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_SETGID CAP_SETUID CAP_SYS_RESOURCE
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-MemoryDenyWriteExecute=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-RestrictRealtime=true
-RestrictNamespaces=true
-
-ProtectSystem=true
-ReadWriteDirectories=-/etc/redis
-*/
-
-    servicesUnits := map[string]map[string]string{}
+// FIXME
+// FIXME run should set common env vars
+func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Units {
+    servicesUnits := map[string]map[string]*Units{}
 
     // generate lb
-    lbUnits := map[string]string{}
+    lbUnits := map[string]*Units{}
     for block, blockInfo := range self.blockInfos["lb"] {
         if blockInfo.host != host {
             continue
@@ -1487,13 +1439,16 @@ ReadWriteDirectories=-/etc/redis
 
         parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
 
-        lbUnits[block] = self.unit("lb", block, parts)
+        lbUnits[block] = &Units{
+            serviceUnit: self.serviceUnit("lb", block, parts),
+            drainUnit: self.drainUnit("lb", block, parts),
+        }
     }
     servicesUnits["lb"] = lbUnits
 
     // config-updater
     // enforce zero exposed ports for the config-updater
-    configUpdaterUnits := map[string]string{}
+    configUpdaterUnits := map[string]*Units{}
     for block, _ := range self.blockInfos["config-updater"] {
         parts := []string{}
         // parts = append(parts, fmt.Sprintf(`WARP_HOME="%s"`, self.targetWarpHome))
@@ -1523,7 +1478,10 @@ ReadWriteDirectories=-/etc/redis
 
         parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
 
-        configUpdaterUnits[block] = self.unit("config-updater", block, parts)
+        configUpdaterUnits[block] = &Units{
+            serviceUnit: self.serviceUnit("config-updater", block, parts),
+            drainUnit: self.drainUnit("config-updater", block, parts),
+        }
     }
     servicesUnits["config-updater"] = configUpdaterUnits
 
@@ -1540,7 +1498,7 @@ ReadWriteDirectories=-/etc/redis
             continue
         }
 
-        serviceUnits := map[string]string{}
+        serviceUnits := map[string]*Units{}
         for block, _ := range serviceBlockInfos {
             parts := []string{}
             // parts = append(parts, fmt.Sprintf(`WARP_HOME="%s"`, self.targetWarpHome))
@@ -1586,7 +1544,10 @@ ReadWriteDirectories=-/etc/redis
 
             parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
 
-            serviceUnits[block] = self.unit(service, block, parts)
+            serviceUnits[block] = &Units{
+                serviceUnit: self.serviceUnit(service, block, parts),
+                drainUnit: self.drainUnit(service, block, parts),
+            }
         }
         servicesUnits[service] = serviceUnits
     }
@@ -1594,8 +1555,8 @@ ReadWriteDirectories=-/etc/redis
     return servicesUnits
 }
 
-func (self *SystemdUnits) unit(service string, block string, cmdArgs []string) string {
 
+func (self *SystemdUnits) serviceUnit(service string, block string, cmdArgs []string) string {
     unit := templateString(`
     [Unit]
     Description=Warpctl {{.env}}-{{.service}} block {{.block}}
@@ -1610,7 +1571,7 @@ func (self *SystemdUnits) unit(service string, block string, cmdArgs []string) s
     Environment="WARP_HOME={{.warpHome}}"
     ExecStart={{.cmd}}
     ExecStop=/bin/kill -s TERM $MAINPID
-    TimeoutStopSec=0
+    TimeoutStopSec=60
     Restart=always
     StandardOutput=file:/var/log/warp/{{.env}}-{{.service}}-{{.block}}.out
     StandardError=file:/var/log/warp/{{.env}}-{{.service}}-{{.block}}.err
@@ -1625,7 +1586,12 @@ func (self *SystemdUnits) unit(service string, block string, cmdArgs []string) s
         "cmd": strings.Join(cmdArgs, " "),
     })
 
-    return indentAndTrimString(unit, 0)
+    return unit
+}
+
+func (self *SystemdUnits) drainUnit(service string, block string, cmdArgs []string) string {
+    // FIXME
+    return ""
 }
 
 

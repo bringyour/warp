@@ -94,21 +94,7 @@ func docker(name string, args ...string) *exec.Cmd {
 }
 
 
-func templateString(text string, data ...map[string]any) string {
-	t, err := template.New("").Parse(text)
-	if err != nil {
-		panic(err)
-	}
-	mergedData := map[string]any{}
-	for _, d := range data {
-		for key, value := range d {
-			mergedData[key] = value
-		}
-	}
-	out := &bytes.Buffer{}
-	t.Execute(out, mergedData)
-	return out.String()
-}
+
 
 
 func expandAnyPorts(portSpec any) ([]int, error) {
@@ -174,6 +160,23 @@ func collapsePorts(ports []int) string {
 	return strings.Join(parts, ",")
 }
 
+
+func templateString(text string, data ...map[string]any) string {
+	unindentedText := indentAndTrimString(text, 0)
+	t, err := template.New("").Parse(unindentedText)
+	if err != nil {
+		panic(err)
+	}
+	mergedData := map[string]any{}
+	for _, d := range data {
+		for key, value := range d {
+			mergedData[key] = value
+		}
+	}
+	out := &bytes.Buffer{}
+	t.Execute(out, mergedData)
+	return out.String()
+}
 
 
 func indentAndTrimString(text string, indent int) string {

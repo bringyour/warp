@@ -199,6 +199,12 @@ On the target server host, create the target WARP_HOME.
   site
 ```
 
+Also make sure the log dir exists.
+
+```
+mkdir /var/log/warp
+```
+
 Configure vault and site outside of warp (e.g. Ansible or some secure system image tool). We will deploy the config as the final step.
 
 Copy `warpctl` to the host into `/usr/local/bin`.

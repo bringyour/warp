@@ -16,6 +16,7 @@ import (
     "errors"
 
     "golang.org/x/exp/maps"
+    "golang.org/x/exp/slices"
 
     "github.com/docopt/docopt-go"
     "github.com/coreos/go-semver/semver"
@@ -110,6 +111,7 @@ Usage:
     warpctl ls versions [<env> [<service>]]
     warpctl lb list-blocks <env>
     warpctl lb list-hosts <env>
+        [--envalias=<envalias>]
     warpctl lb create-config <env> [<block>]
         [--envalias=<envalias>]
         [--out=<outdir>]
@@ -774,15 +776,11 @@ func lsVersions(opts docopt.Opts) {
 
 func lbListBlocks(opts docopt.Opts) {
 
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
-    }
+    env, _ := opts.String("<env>")
 
     blockInfos := getBlockInfos(env)
 
-    lbBlockInfos := blockInfos["lb"]
-    blocks := maps.Keys(lbBlockInfos)
+    blocks := maps.Keys(blockInfos["lb"])
     sort.Strings(blocks)
     for _, block := range blocks {
         fmt.Printf("%s\n", block)
@@ -791,56 +789,47 @@ func lbListBlocks(opts docopt.Opts) {
 
 
 func lbListHosts(opts docopt.Opts) {
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
-    }
-
-    blockInfos := getBlockInfos(env)
-
-    hosts := []string{}
-    for _, blockInfo := range blockInfos["lb"] {
-        hosts = append(hosts, blockInfo.host)
-    }
-    sort.Strings(hosts)
-    for _, host := range hosts {
-        fmt.Printf("%s\n", host)
-    }
-}
-
-
-func lbCreateConfig(opts docopt.Opts) {
-    // FIXME read the site meta data
-    fmt.Printf("nginx config\n")
-
-    // FIXME
-    // FIXME lb.go
-    // nginxConfig := NewNginxConfig(env)
-    // blockConfigs := nginxConfig.generate()
-
-    // if one block, print the config for that block without a header
-    // if more than one block, add a header before each block
-
-
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
-    }
+    env, _ := opts.String("<env>")
 
     envAliases := []string{}
     if envAlias, err := opts.String("--envalias"); err == nil {
         envAliases = append(envAliases, envAlias)
     }
 
-    includeBlocks := []string{}
-    if block, err := opts.String("<block>"); err == nil {
-        includeBlocks = append(includeBlocks, block)
+    servicesConfig := getServicesConfig(env)
+
+    services := maps.Keys(servicesConfig.Versions[0].Services)
+    sort.Strings(services)
+    for _, service := range services {
+        fmt.Printf("%s-%s.%s\n", env, service, servicesConfig.Domain)
+        for _, envAlias := range envAliases {
+            fmt.Printf("%s-%s.%s\n", envAlias, service, servicesConfig.Domain)
+        }
+    }
+}
+
+
+func lbCreateConfig(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
+
+    envAliases := []string{}
+    if envAlias, err := opts.String("--envalias"); err == nil {
+        envAliases = append(envAliases, envAlias)
     }
 
+    var includeBlocks []string
+    if block, err := opts.String("<block>"); err == nil {
+        includeBlocks = append(includeBlocks, block)
+    } else {
+        includeBlocks = []string{}
+    }
 
-
-
-
+    var outDir string
+    if path, err := opts.String("--out"); err == nil {
+        outDir = path
+    } else {
+        outDir = ""
+    }
 
     nginxConfig, err := NewNginxConfig(env, envAliases)
     if err != nil {
@@ -848,36 +837,46 @@ func lbCreateConfig(opts docopt.Opts) {
     }
     blockConfigs := nginxConfig.Generate()
 
-    outParts := []string{}
 
-    if len(includeBlocks) == 0 {
-        for block, config := range blockConfigs {
-            outParts = append(outParts, fmt.Sprintf("#\n# %s\n#\n\n%s", block, config))
-        }
-    } else if len(includeBlocks) == 1 {
-        block := includeBlocks[0]
-        config, ok := blockConfigs[block]
-        if !ok {
-            panic(fmt.Sprintf("Block \"%s\" not found", block))
-        }
-        outParts = append(outParts, config)
-    } else {
-        for _, block := range includeBlocks {
-            config, ok := blockConfigs[block]
-            if !ok {
-                panic(fmt.Sprintf("Block \"%s\" not found", block))
+    out := func(block string, config string) {
+        if outDir == "" {
+            fmt.Println(templateString(`
+            # block: {{.block}}
+
+            {{.config}}
+
+            `, map[string]any {
+                "block": block,
+                "config": config,
+            }))
+        } else {
+            // write to file
+            // <dir>/<block>.conf
+            unitFileName := fmt.Sprintf("%s.conf", block)
+            err := os.WriteFile(
+                path.Join(outDir, unitFileName),
+                []byte(config),
+                0644,
+            )
+            if err != nil {
+                panic(err)
             }
-            outParts = append(outParts, fmt.Sprintf("#\n# %s\n#\n\n", block))
-            outParts = append(outParts, config)
         }
     }
 
-    outStr := strings.Join(outParts, "\n")
+    includesBlock := func(block string)(bool) {
+        if len(includeBlocks) == 0 {
+            return true
+        }
+        return slices.Contains(includeBlocks, block)
+    }
 
-    if outPath, err := opts.String("--out"); err == nil {
-        os.WriteFile(outPath, []byte(outStr), 0644)
-    } else {
-        fmt.Printf("%s", outStr)
+    for block, config := range blockConfigs {
+        if !includesBlock(block) {
+            continue
+        }
+
+        out(block, config)
     }
 }
 
@@ -1000,18 +999,18 @@ func serviceRun(opts docopt.Opts) {
 func createUnits(opts docopt.Opts) {
     env, _ := opts.String("<env>")
 
-    var filterService string
+    var includeServices []string
     if service, err := opts.String("<service>"); err == nil {
-        filterService = service
+        includeServices = []string{service}
     } else {
-        filterService = ""
+        includeServices = []string{}
     }
 
-    var filterBlock string
+    var includeBlocks []string
     if block, err := opts.String("<block>"); err == nil {
-        filterBlock = block
+        includeBlocks = []string{block}
     } else {
-        filterBlock = ""
+        includeBlocks = []string{}
     }
 
     var targetWarpHome string
@@ -1052,7 +1051,6 @@ func createUnits(opts docopt.Opts) {
 
             {{.unit}}
 
-
             `, map[string]any {
                 "host": host,
                 "service": service,
@@ -1063,29 +1061,32 @@ func createUnits(opts docopt.Opts) {
             // write to file
             // <dir>/<host>/warp-<env>-<service>-<block>.service
             hostDir := path.Join(outDir, host)
-            os.MkdirAll(hostDir, 0644)
+            os.MkdirAll(hostDir, 0755)
             unitFileName := fmt.Sprintf("warp-%s-%s-%s.service", env, service, block)
-            os.WriteFile(
+            err := os.WriteFile(
                 path.Join(hostDir, unitFileName),
                 []byte(unit),
                 0644,
             )
+            if err != nil {
+                panic(err)
+            }
         }
     }
 
 
     includesService := func(service string)(bool) {
-        if filterService == "" {
+        if len(includeServices) == 0 {
             return true
         }
-        return filterService == service
+        return slices.Contains(includeServices, service)
     }
 
     includesBlock := func(block string)(bool) {
-        if filterBlock == "" {
+        if len(includeBlocks) == 0 {
             return true
         }
-        return filterBlock == block
+        return slices.Contains(includeBlocks, block)
     }
 
     for host, servicesUnits := range hostsServicesUnits {

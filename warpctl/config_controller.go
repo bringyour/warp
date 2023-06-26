@@ -222,7 +222,7 @@ type BlockInfo struct {
 
 
 
-// service -> blockinfo
+// service -> block -> blockinfo
 func getBlockInfos(env string) map[string]map[string]*BlockInfo {
     servicesConfig := getServicesConfig(env)
 
@@ -1559,7 +1559,7 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
 func (self *SystemdUnits) serviceUnit(service string, block string, cmdArgs []string) string {
     unit := templateString(`
     [Unit]
-    Description=Warpctl {{.env}}-{{.service}} block {{.block}}
+    Description=Warpctl {{.env}} {{.service}} {{.block}}
     Requires=network.target
     After=network.target
     Requires=docker.service

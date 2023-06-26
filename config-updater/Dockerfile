@@ -16,4 +16,4 @@ COPY build/$TARGETPLATFORM/config-updater /usr/local/bin/config-updater
 RUN mkdir -p /root/config
 ADD build/$WARP_ENV/config /root/config
 
-CMD ["/usr/local/bin/config-updater"]
+CMD ["/usr/local/bin/config-updater", "/root/config", "/srv/warp/config"]

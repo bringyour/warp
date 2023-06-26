@@ -127,6 +127,7 @@ Usage:
         [--status=<status_mode>]
         [--status-prefix=<status_prefix>]
         --domain=<domain>
+        [--envvar=<envvar>...]
     warpctl service drain <env> <service> <block>
         [--portblocks=<portblocks>]
     warpctl service create-units <env> [<service> [<block>]]
@@ -901,11 +902,7 @@ func serviceRun(opts docopt.Opts) {
     var routingTable *RoutingTable
     var dockerNetwork *DockerNetwork
 
-    if _, ok := opts["--rttable"]; ok {
-        routingTableStr, err := opts.String("--rttable")
-        if err != nil {
-            panic(err)
-        }
+    if routingTableStr, err := opts.String("--rttable"); err == nil {
         routingTable = parseRoutingTable(routingTableStr)
 
         dockerNetStr, err := opts.String("--dockernet")
@@ -970,6 +967,19 @@ func serviceRun(opts docopt.Opts) {
     var statusPrefix string
     if prefix, err := opts.String("--status-prefix"); err == nil {
         statusPrefix = prefix
+    } else {
+        statusPrefix = ""
+    }
+
+    envVars := map[string]string{}
+    if pairs, ok := opts["--envvar"]; ok {
+        for _, pair := range pairs.([]string) {
+            parts := strings.SplitN(pair, ":", 2)
+            if 2 != len(parts) {
+                panic(fmt.Sprintf("Invalid envvar format. Must be key:value. (%s)", pair))
+            }
+            envVars[parts[0]] = parts[1]
+        }
     }
 
     state := getWarpState()
@@ -991,6 +1001,7 @@ func serviceRun(opts docopt.Opts) {
         siteMountMode: siteMountMode,
         statusMode: statusMode,
         statusPrefix: statusPrefix,
+        envVars: envVars,
     }
     runWorker.Run()
 }

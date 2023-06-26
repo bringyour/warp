@@ -102,6 +102,7 @@ type ServiceConfig struct {
     Exposed *bool `yaml:"exposed,omitempty"`
     LbExposed *bool `yaml:"lb_exposed,omitempty"`
     Hosts []string `yaml:"hosts,omitempty"`
+    EnvVars map[string]string `yaml:"env_vars,omitempty"`
     Blocks []map[string]int `yaml:"blocks,omitempty"`
     // see https://github.com/go-yaml/yaml/issues/63
     PortConfig `yaml:",inline"`
@@ -1543,6 +1544,10 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
             parts = append(parts, fmt.Sprintf("--status=%s", statusMode))
 
             parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
+
+            for key, value := range serviceConfig.EnvVars {
+                parts = append(parts, fmt.Sprintf("--envvar=%s:%s", key, value))
+            }
 
             serviceUnits[block] = &Units{
                 serviceUnit: self.serviceUnit(service, block, parts),

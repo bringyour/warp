@@ -69,6 +69,9 @@ versions:
             # if no hosts list, all lb hosts are used
             # hosts:
             #   - by-us-fmt-1-edge-0.bringyour.com
+            # env_vars:
+            #     ONE: "2"
+            #     THREE: four
             ports:
                 - 80
             # udp_ports:

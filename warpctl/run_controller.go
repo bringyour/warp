@@ -70,6 +70,8 @@ type RunWorker struct {
 	statusMode string
 	statusPrefix string
 
+	envVars map[string]string
+
 	deployedVersion *semver.Version
 	deployedConfigVersion *semver.Version
 
@@ -340,11 +342,19 @@ func (self *RunWorker) initRoutingTable() {
 
 
 func (self *RunWorker) iptablesChainName() string {
+	var shortBlock string
+	if self.service == "lb" {
+		// use the interface name which is locally unique
+		parts := strings.Split(self.block, "-")
+		shortBlock = parts[len(parts) - 1]
+	} else {
+		shortBlock = self.block
+	}
 	return fmt.Sprintf(
 		"WARP-%s-%s-%s",
 		strings.ToUpper(self.env),
 		strings.ToUpper(self.service),
-		strings.ToUpper(self.routingTable.interfaceName),
+		strings.ToUpper(shortBlock),
 	)
 }
 
@@ -593,6 +603,10 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 	}
 	if self.siteMountMode != MOUNT_MODE_NO {
 		env["WARP_SITE"] = siteMount
+	}
+	// add the user env vars
+	for key, value := range self.envVars {
+		env[key] = value
 	}
 	for name, value := range env {
 		args = append(args, []string{"-e", fmt.Sprintf("%s=%s", name, value)}...)	

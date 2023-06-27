@@ -103,6 +103,7 @@ type ServiceConfig struct {
     LbExposed *bool `yaml:"lb_exposed,omitempty"`
     Hosts []string `yaml:"hosts,omitempty"`
     EnvVars map[string]string `yaml:"env_vars,omitempty"`
+    Mount map[string]string `yaml:"mount,omitempty"`
     Blocks []map[string]int `yaml:"blocks,omitempty"`
     // see https://github.com/go-yaml/yaml/issues/63
     PortConfig `yaml:",inline"`
@@ -655,6 +656,19 @@ func isLbExposed(env string, service string) bool {
         return false
     }
     return serviceConfig.isLbExposed()
+}
+
+func isStandardStatus(env string, service string) bool {
+    if service == "lb" {
+        return true
+    }
+    servicesConfig := getServicesConfig(env)
+    serviceConfig, ok := servicesConfig.Versions[0].Services[service]
+    if !ok {
+        // doesn't exist
+        return false
+    }
+    return serviceConfig.getStatusMode() == "standard"
 }
 
 func getHiddenPrefix(env string) string {
@@ -1531,9 +1545,26 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
 
             parts = append(parts, fmt.Sprintf("--services_dockernet=%s", self.servicesConfig.Versions[0].ServicesDockerNetwork))
 
-            vaultMode := "yes"
-            configMode := "yes"
-            siteMode := "yes"
+            var vaultMode string
+            if mode, ok := serviceConfig.Mount["vault"]; ok {
+                vaultMode = mode
+            } else {
+                vaultMode = "yes"
+            }
+
+            var configMode string
+            if mode, ok := serviceConfig.Mount["config"]; ok {
+                configMode = mode
+            } else {
+                configMode = "yes"
+            }
+
+            var siteMode string
+            if mode, ok := serviceConfig.Mount["site"]; ok {
+                siteMode = mode
+            } else {
+                siteMode = "yes"
+            }
 
             parts = append(parts, fmt.Sprintf("--mount_vault=%s", vaultMode))
             parts = append(parts, fmt.Sprintf("--mount_config=%s", configMode))
@@ -1599,5 +1630,48 @@ func (self *SystemdUnits) drainUnit(service string, block string, cmdArgs []stri
     return ""
 }
 
+
+// host -> commands
+func getDockerNetworkCommands(env string) map[string][][]string {
+    /*
+    docker network create --attachable --opt 'com.docker.network.bridge.name=warp1' --opt 'com.docker.network.bridge.enable_ip_masquerade=false' warp1 
+    docker network create --attachable --opt 'com.docker.network.bridge.name=warpsservices' warpsservices
+    */
+
+    servicesConfig := getServicesConfig(env)
+
+    hostNetworkCommands := map[string][][]string{}
+
+    for host, lbBlocks := range servicesConfig.Versions[0].Lb.Interfaces {
+        networkCommands := [][]string{}
+
+        // services network
+        servicesDockerNetwork := servicesConfig.Versions[0].ServicesDockerNetwork
+        servicesNetworkCommand := []string{
+            "docker", "network", "create", "--attachable",
+            // interface name should be equal to the network name
+            "--opt", fmt.Sprintf("com.docker.network.bridge.name=%s", servicesDockerNetwork),
+            servicesDockerNetwork,
+        }
+        networkCommands = append(networkCommands, servicesNetworkCommand)
+
+        for _, lbBlock := range lbBlocks {
+            // block network
+            blockNetworkCommand := []string{
+                "docker", "network", "create", "--attachable",
+                // interface name should be equal to the network name
+                "--opt", fmt.Sprintf("com.docker.network.bridge.name=%s", lbBlock.DockerNetwork),
+                // disable masquerade (snat) to preserve the source ip
+                "--opt", "com.docker.network.bridge.enable_ip_masquerade=false",
+                lbBlock.DockerNetwork,
+            }
+            networkCommands = append(networkCommands, blockNetworkCommand)
+        }
+
+        hostNetworkCommands[host] = networkCommands
+    }
+
+    return hostNetworkCommands
+}
 
 

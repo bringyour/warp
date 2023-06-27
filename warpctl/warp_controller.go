@@ -64,19 +64,34 @@ func (self *WarpSettings) RequireDockerHubToken() string {
 }
 func (self *WarpSettings) RequireVaultHome() string {
 	if self.VaultHome == nil {
-		panic("WARP_VAULT_HOME is not set. Use warpctl init.")
+		warpHome := os.Getenv("WARP_HOME")
+		if warpHome == "" {
+			panic("WARP_VAULT_HOME is not set. Use warpctl init.")
+		} else {
+			return path.Join(warpHome, "vault")
+		}
 	}
 	return *self.VaultHome
 }
 func (self *WarpSettings) RequireConfigHome() string {
 	if self.ConfigHome == nil {
-		panic("WARP_CONFIG_HOME is not set. Use warpctl init.")
+		warpHome := os.Getenv("WARP_HOME")
+		if warpHome == "" {
+			panic("WARP_CONFIG_HOME is not set. Use warpctl init.")
+		} else {
+			return path.Join(warpHome, "config")
+		}
 	}
 	return *self.ConfigHome
 }
 func (self *WarpSettings) RequireSiteHome() string {
 	if self.ConfigHome == nil {
-		panic("WARP_SITE_HOME is not set. Use warpctl init.")
+		warpHome := os.Getenv("WARP_HOME")
+		if warpHome == "" {
+			panic("WARP_SITE_HOME is not set. Use warpctl init.")
+		} else {
+			return path.Join(warpHome, "site")
+		}
 	}
 	return *self.SiteHome
 }
@@ -413,6 +428,7 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
 	latestRegex := regexp.MustCompile("^(.*)-latest$")
 
 	url := self.NamespaceUrl(fmt.Sprintf("/repositories/%s-%s/images", env, service))
+	fmt.Printf("URL %s\n", url)
 	for {
 	    imagesRequest, err := http.NewRequest("GET", url, nil)
 	    if err != nil {
@@ -434,10 +450,14 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
 	    	panic(err)
 	    }
 
+	    fmt.Printf("Response %s\n", body)
+
 	    
 		for _, result := range dockerHubImagesResponse.Results {
 			if result.Status == "active" {
 				imageVersions := []*semver.Version{}
+
+				fmt.Printf("TAGS %s\n", result.Tags)
 
 				for _, tag := range result.Tags {
 					if tag.IsCurrent {
@@ -457,13 +477,13 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
 						if groups := latestRegex.FindStringSubmatch(tag.Tag); groups != nil {
 							fmt.Printf("MATCHED LATEST VERSION AGAINST %s\n", tag.Tag)
 							block := groups[1]
-							if len(imageVersions) == 0 {
-								panic("Latest tag does not have an associated version.")
+							// if len(imageVersions) == 0,
+							// 	  the latest tag does not have an associated version
+							// if 1 < len(imageVersions),
+							//    the latest tag has more than one associated version
+							if len(imageVersions) == 1 {
+								latestBlocks[block] = imageVersions[0]
 							}
-							if 1 < len(imageVersions) {
-								panic("Latest tag has more than one associated version.")
-							}
-							latestBlocks[block] = imageVersions[0]
 						}
 					}
 				}
@@ -569,8 +589,6 @@ func (self *WarpStatusResponse) IsError() bool {
 
 
 func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions {
-	
-
 	resultsMutex := sync.Mutex{}
 	versions := map[*semver.Version]int{}
 	configVersions := map[*semver.Version]int{}
@@ -677,6 +695,10 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
 func pollLbBlockStatusUntil(env string, service string, blocks []string, targetVersion string) {
 	// TODO for lb, if the service config mapped each interface to a public ip, 
 	// TODO then we could reach individual blocks via a http+ip+host header
+	if !isStandardStatus(env, service) {
+		return
+	}
+
 	if service != "lb" {
 		if !isLbExposed(env, service) {
 			// the service is not externally exposed
@@ -716,6 +738,10 @@ func pollLbBlockStatusUntil(env string, service string, blocks []string, targetV
 
 
 func pollLbServiceStatusUntil(env string, service string, targetVersion string) {
+	if !isStandardStatus(env, service) {
+		return
+	}
+
 	if service == "lb" {
 		domain := getDomain(env)
 		hiddenPrefix := getLbHiddenPrefix(env)

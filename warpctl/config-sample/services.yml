@@ -72,6 +72,10 @@ versions:
             # env_vars:
             #     ONE: "2"
             #     THREE: four
+            # mount:
+            #     vault: no
+            #     config: no
+            #     site: no
             ports:
                 - 80
             # udp_ports:

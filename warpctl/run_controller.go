@@ -169,7 +169,7 @@ func (self *RunWorker) Run() {
 				announceRunStart()
 				defer func() {
 					if err := recover(); err != nil {
-						fmt.Printf("DEPlOY ERROR %s %s\n", self.deployedVersion, self.deployedConfigVersion)
+						fmt.Printf("DEPLOY ERROR %s %s %s\n", self.deployedVersion, self.deployedConfigVersion, err)
 						announceRunError()
 					}
 				}()
@@ -342,6 +342,26 @@ func (self *RunWorker) initRoutingTable() {
 
 
 func (self *RunWorker) iptablesChainName() string {
+	// iptables target names are 28 chars max
+
+	maxServiceLen := 10
+	var shortService string
+	if len(self.service) <= maxServiceLen {
+		shortService = self.service
+	} else if parts := strings.Split(self.service, "-"); 1 < len(parts) && len(parts) <= maxServiceLen / 2 {
+		firstLetters := []string{}
+		for _, part := range parts {
+			if 0 < len(part) {
+				firstLetters = append(firstLetters, part[:1])
+			} else {
+				firstLetters = append(firstLetters, "")
+			}
+		}
+		shortService = strings.Join(firstLetters, "-")
+	} else {
+		shortService = self.service[:maxServiceLen]
+	}
+
 	var shortBlock string
 	if self.service == "lb" {
 		// use the interface name which is locally unique
@@ -350,10 +370,11 @@ func (self *RunWorker) iptablesChainName() string {
 	} else {
 		shortBlock = self.block
 	}
+
 	return fmt.Sprintf(
 		"WARP-%s-%s-%s",
 		strings.ToUpper(self.env),
-		strings.ToUpper(self.service),
+		strings.ToUpper(shortService),
 		strings.ToUpper(shortBlock),
 	)
 }
@@ -368,11 +389,13 @@ func (self *RunWorker) initBlockRedirect() {
 	).Run()
  
 	chainCmd := func(op string, entryChainName string) *exec.Cmd {
-		return sudo(
+		cmd := sudo(
 			"iptables", "-t", "nat", op, entryChainName,
 			"-m", "addrtype", "--dst-type", "LOCAL",
 			"-j", chainName,
 		)
+		fmt.Printf("%s\n", cmd)
+		return cmd
 	}
 
 	// apply chain to external traffic to local

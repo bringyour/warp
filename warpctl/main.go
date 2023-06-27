@@ -117,7 +117,8 @@ Usage:
         [--envalias=<envalias>]
         [--out=<outdir>]
     warpctl run-local <Makefile> [--envalias=<envalias>]
-    warpctl service ls docker-network <env>
+    warpctl service docker-networks <env>
+    warpctl service routing-tables <env>
     warpctl service run <env> <service> <block>
         [--rttable=<rttable> --dockernet=<dockernet>]
         [--portblocks=<portblocks>]
@@ -206,6 +207,10 @@ Options:
     } else if service, _ := opts.Bool("service"); service {
         if run, _ := opts.Bool("run"); run {
             serviceRun(opts)
+        } else if dockerNetworks_, _ := opts.Bool("docker-networks"); dockerNetworks_ {
+            dockerNetworks(opts)
+        } else if routingTables_, _ := opts.Bool("routing-tables"); routingTables_ {
+            routingTables(opts)
         } else if createUnits_, _ := opts.Bool("create-units"); createUnits_ {
             createUnits(opts)
         }
@@ -417,14 +422,14 @@ func build(opts docopt.Opts) {
 
 func importImage(opts docopt.Opts) {
     env, _ := opts.String("<env>")
-    image, _ := opts.String("<image>")
+    sourceImageName, _ := opts.String("<image>")
 
     var serviceName string
     if name, err := opts.String("--service_name"); err == nil {
         serviceName = name
     } else {
         serviceNameRegex := regexp.MustCompile("^(.*)/([^:]+):(.*)$")
-        if groups := serviceNameRegex.FindStringSubmatch(image); groups != nil {
+        if groups := serviceNameRegex.FindStringSubmatch(sourceImageName); groups != nil {
             serviceName = groups[2]
         }
     }
@@ -432,7 +437,7 @@ func importImage(opts docopt.Opts) {
     state := getWarpState()
     dockerVersion := state.getVersion(true, true)
 
-    targetImage := fmt.Sprintf(
+    targetImageName := fmt.Sprintf(
         "%s/%s-%s:%s",
         state.warpSettings.RequireDockerNamespace(),
         env,
@@ -440,17 +445,21 @@ func importImage(opts docopt.Opts) {
         dockerVersion,
     )
 
-    fmt.Printf("Importing to %s\n", targetImage)
+    fmt.Printf("Importing to %s\n", targetImageName)
 
-    if err := docker("pull", image).Run(); err != nil {
-        panic(err)
-    }
-    if err := docker("tag", image, targetImage).Run(); err != nil {
-        panic(err)
-    }
-    if err := docker("push", targetImage).Run(); err != nil {
-        panic(err)
-    }
+    cmds := NewCommandList()
+
+    // cmds.Docker("pull", sourceImageName)
+    cmds.Docker("buildx", "imagetools", "create", "-t", targetImageName, sourceImageName)
+
+    cmds.Run()
+
+    // if err := docker("tag", image, targetImage).Run(); err != nil {
+    //     panic(err)
+    // }
+    // if err := docker("push", targetImage).Run(); err != nil {
+    //     panic(err)
+    // }
 }
 
 
@@ -466,12 +475,13 @@ func deploy(opts docopt.Opts) {
     if version, err := opts.String("<version>"); err == nil {
         deployVersion = version
     } else {
-        serviceMeta := dockerHubClient.getServiceMeta()
-        fmt.Printf("SERVICE META %s\n", serviceMeta)
-        versionMeta, ok := serviceMeta.envVersionMetas[env][service]
-        if !ok {
-            panic("Env service not found in repo.")
-        }
+        // serviceMeta := dockerHubClient.getServiceMeta()
+        // fmt.Printf("SERVICE META %s\n", serviceMeta)
+        versionMeta := dockerHubClient.getVersionMeta(env, service)
+        // versionMeta, ok := serviceMeta.envVersionMetas[env][service]
+        // if !ok {
+        //     panic("Env service not found in repo.")
+        // }
         versions := versionMeta.versions
 
         fmt.Printf("FOUND VERSIONS %s\n", versions)
@@ -571,9 +581,9 @@ func deploy(opts docopt.Opts) {
         cmds := NewCommandList()
         cmds.Dir = state.warpVersionHome
 
-        cmds.Docker("pull", sourceImageName)
-        cmds.Docker("pull", deployImageName).IgnoreErrors()
-        cmds.Docker("rmi", deployImageName).IgnoreErrors()
+        // cmds.Docker("pull", sourceImageName)
+        // cmds.Docker("pull", deployImageName).IgnoreErrors()
+        // cmds.Docker("rmi", deployImageName).IgnoreErrors()
         // fmt.Sprintf("%s-latest", block)
         cmds.Docker("buildx", "imagetools", "create", "-t", deployImageName, sourceImageName)
         // cmds.docker("tag", sourceImageName, deployImageName)
@@ -585,6 +595,7 @@ func deploy(opts docopt.Opts) {
     }
 
     // the /status routes are only exposed via the load balancer internal routes
+
 
     // poll the load balancer for the specific blocks until the versions stabilize
     pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion)
@@ -1049,6 +1060,37 @@ func serviceRun(opts docopt.Opts) {
 }
 
 
+func dockerNetworks(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
+
+    hostNetworkCommands := getDockerNetworkCommands(env)
+
+    for host, networkCommands := range hostNetworkCommands {
+        fmt.Printf("%s\n", host)
+        for _, networkCommand := range networkCommands {
+            fmt.Printf("    %s\n", strings.Join(networkCommand, " "))
+        }
+    }
+}
+
+
+func routingTables(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
+
+    servicesConfig := getServicesConfig(env)
+
+
+    fmt.Printf("# /etc/iproute2/rt_tables\n")
+    tableNumbers, err := expandAnyPorts(servicesConfig.Versions[0].RoutingTables)
+    if err != nil {
+        panic(err)
+    }
+    for _, tableNumber := range tableNumbers {
+        fmt.Printf("%d    warp%d\n", tableNumber, tableNumber)
+    }
+}
+
+
 func createUnits(opts docopt.Opts) {
     env, _ := opts.String("<env>")
 
@@ -1070,7 +1112,7 @@ func createUnits(opts docopt.Opts) {
     if path, err := opts.String("--target_warp_home"); err == nil {
         targetWarpHome = path
     } else {
-        targetWarpHome = "/srv/warp"
+        targetWarpHome = fmt.Sprintf("/srv/warp/%s", env)
     }
 
     var targetWarpctl string

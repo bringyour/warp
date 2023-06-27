@@ -14,6 +14,7 @@ import (
     // "syscall"
     // "os/signal"
     "errors"
+    "regexp"
 
     "golang.org/x/exp/maps"
     "golang.org/x/exp/slices"
@@ -95,7 +96,7 @@ Usage:
         [--site_home=<site_home>]
     warpctl stage version (local | sync | next (beta | release) --message=<message>)
     warpctl build <env> <Makefile>
-    warpctl import <env> <repo>
+    warpctl import <env> <image> [--service_name=<service_name>]
     warpctl deploy <env> <service>
         (latest-local | latest-beta | latest | <version>)
         (<blocklist> | --percent=<percent>)
@@ -174,6 +175,8 @@ Options:
         }
     } else if build_, _ := opts.Bool("build"); build_ {
         build(opts)
+    } else if import_, _ := opts.Bool("import"); import_ {
+        importImage(opts)
     } else if deploy_, _ := opts.Bool("deploy"); deploy_ {
         deploy(opts)
     } else if deployLocal_, _ := opts.Bool("deploy-local"); deployLocal_ {
@@ -268,7 +271,7 @@ func stageVersion(opts docopt.Opts) {
         state.versionSettings.StagedVersion = &version
         setWarpState(state)
 
-        fmt.Printf("%s (local)\n", getVersion(false, false))
+        fmt.Printf("%s (local)\n", state.getVersion(false, false))
     } else {
         sync, _ := opts.Bool("sync")
         next, _ := opts.Bool("next")
@@ -351,7 +354,7 @@ func stageVersion(opts docopt.Opts) {
             }
         }
 
-        fmt.Printf("%s\n", getVersion(false, false))
+        fmt.Printf("%s\n", state.getVersion(false, false))
     }
 }
 
@@ -367,6 +370,8 @@ func build(opts docopt.Opts) {
     // WARP_VERSION
     // WARP_ENV
 
+    env, _ := opts.String("<env>")
+
     makefile, _ := opts.String("<Makefile>")
     makefileName := path.Base(makefile)
     makfileDirPath := path.Dir(makefile)
@@ -378,10 +383,7 @@ func build(opts docopt.Opts) {
     }
 
     state := getWarpState()
-
-    env, _ := opts.String("<env>")
-
-    version := getVersion(true, true)
+    version := state.getVersion(true, true)
 
     envVars := map[string]string{
         "WARP_VAULT_HOME": state.warpSettings.RequireVaultHome(),
@@ -410,6 +412,45 @@ func build(opts docopt.Opts) {
     }
 
     announceBuild(env, service, version)
+}
+
+
+func importImage(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
+    image, _ := opts.String("<image>")
+
+    var serviceName string
+    if name, err := opts.String("--service_name"); err == nil {
+        serviceName = name
+    } else {
+        serviceNameRegex := regexp.MustCompile("^(.*)/([^:]+):(.*)$")
+        if groups := serviceNameRegex.FindStringSubmatch(image); groups != nil {
+            serviceName = groups[2]
+        }
+    }
+
+    state := getWarpState()
+    dockerVersion := state.getVersion(true, true)
+
+    targetImage := fmt.Sprintf(
+        "%s/%s-%s:%s",
+        state.warpSettings.RequireDockerNamespace(),
+        env,
+        serviceName,
+        dockerVersion,
+    )
+
+    fmt.Printf("Importing to %s\n", targetImage)
+
+    if err := docker("pull", image).Run(); err != nil {
+        panic(err)
+    }
+    if err := docker("tag", image, targetImage).Run(); err != nil {
+        panic(err)
+    }
+    if err := docker("push", targetImage).Run(); err != nil {
+        panic(err)
+    }
 }
 
 
@@ -575,7 +616,8 @@ func deployRelease(opts docopt.Opts) {
 func lsVersion(opts docopt.Opts) {
     build, _ := opts.Bool("-b")
     docker, _ := opts.Bool("-d")
-    version := getVersion(build, docker)
+    state := getWarpState()
+    version := state.getVersion(build, docker)
     fmt.Printf("%s\n", version)
 }
 

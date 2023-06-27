@@ -171,10 +171,10 @@ func getLocalVersion() string {
 }
 
 
-func getVersion(build bool, docker bool) string {
-    state := getWarpState()
+func (self *WarpState) getVersion(build bool, docker bool) string {
+    // state := getWarpState()
 
-    stagedVersion := state.versionSettings.StagedVersion
+    stagedVersion := self.versionSettings.StagedVersion
 
     var version string
     if stagedVersion == nil || *stagedVersion == "local" {

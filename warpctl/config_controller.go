@@ -116,6 +116,10 @@ func (self *ServiceConfig) getStatusMode() string {
     return "standard"
 }
 
+func (self *ServiceConfig) isStandardStatus() bool {
+    return self.getStatusMode() == "standard"
+}
+
 func (self *ServiceConfig) isExposed() bool {
     // default true
     return self.Exposed == nil || *self.Exposed
@@ -668,7 +672,7 @@ func isStandardStatus(env string, service string) bool {
         // doesn't exist
         return false
     }
-    return serviceConfig.getStatusMode() == "standard"
+    return serviceConfig.isStandardStatus()
 }
 
 func getHiddenPrefix(env string) string {
@@ -890,10 +894,10 @@ func (self *NginxConfig) addNginxConfig() {
         ##
         # SSL Settings
         ##
+        # see https://syslink.pl/cipherlist/
 
         ssl_protocols TLSv1.2 TLSv1.3;
         ssl_prefer_server_ciphers on;
-        # see https://syslink.pl/cipherlist/
         ssl_dhparam /etc/nginx/dhparam.pem; # openssl dhparam -out /etc/nginx/dhparam.pem 4096
         ssl_ciphers EECDH+AESGCM:EDH+AESGCM;
         ssl_ecdh_curve secp384r1; # Requires nginx >= 1.1.0
@@ -904,10 +908,6 @@ func (self *NginxConfig) addNginxConfig() {
         ssl_stapling_verify on; # Requires nginx => 1.3.7
         resolver 1.1.1.1 1.0.0.1 valid=300s;
         resolver_timeout 5s;
-        add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload";
-        add_header X-Frame-Options DENY;
-        add_header X-Content-Type-Options nosniff;
-        add_header X-XSS-Protection "1; mode=block";
 
         ##
         # Logging Settings
@@ -1238,18 +1238,20 @@ func (self *NginxConfig) addServiceBlocks() {
             })
 
             for _, routePrefix := range self.getRoutePrefixes() {
-                statusLocation := templateString(
-                    "location ={{.routePrefix}}/status",
-                    map[string]any{
-                        "routePrefix": routePrefix,
-                    },
-                )
+                if serviceConfig.isStandardStatus() {
+                    statusLocation := templateString(
+                        "location ={{.routePrefix}}/status",
+                        map[string]any{
+                            "routePrefix": routePrefix,
+                        },
+                    )
 
-                self.block(statusLocation, func() {
-                    self.raw(`
-                    deny all;
-                    `)
-                })
+                    self.block(statusLocation, func() {
+                        self.raw(`
+                        deny all;
+                        `)
+                    })
+                }
 
                 location := templateString(
                     "location {{.routePrefix}}/",
@@ -1266,42 +1268,45 @@ func (self *NginxConfig) addServiceBlocks() {
                         "service": service,
                     })
 
-                    // apply cors policies
-                    if 0 < len(serviceConfig.CorsOrigins) {
+                    addSecurityHeaders := func() {
                         self.raw(`
-                        # see https://enable-cors.org/server_nginx.html
-                        if ($request_method = 'OPTIONS') {
-                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}';
-                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
-                            #
-                            # Custom headers and headers various browsers *should* be OK with but aren't
-                            #
-                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version';
-                            #
-                            # Tell client that this pre-flight info is valid for 20 days
-                            #
-                            add_header 'Access-Control-Max-Age' 1728000;
-                            add_header 'Content-Type' 'text/plain; charset=utf-8';
-                            add_header 'Content-Length' 0;
-                            return 204;
-                         }
-                         if ($request_method = 'POST') {
-                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}' always;
-                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
-                            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
-                         }
-                         if ($request_method = 'GET') {
-                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}' always;
-                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
-                            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
-                         }
-                        `, map[string]any{
-                            // use space separated multiple origins
-                            "corsOrigins": strings.Join(serviceConfig.CorsOrigins, " "),
-                        })
+                        # see https://syslink.pl/cipherlist/
+                        add_header 'Strict-Transport-Security' 'max-age=63072000; includeSubDomains; preload' always;
+                        add_header 'X-Frame-Options' 'DENY' always;
+                        add_header 'X-Content-Type-Options' 'nosniff' always;
+                        add_header 'X-XSS-Protection' '1; mode=block' always;
+                        `)
                     }
+
+                    addCorsHeaders := func() {
+                        if 0 < len(serviceConfig.CorsOrigins) {
+                            self.raw(`
+                            # see https://enable-cors.org/server_nginx.html
+                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}' always;
+                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
+                            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                            `, map[string]any{
+                                // use space separated multiple origins
+                                "corsOrigins": strings.Join(serviceConfig.CorsOrigins, " "),
+                            })
+                        }
+                    }
+
+                    self.block("if ($request_method = 'OPTIONS')", func() {
+                        // nginx inheritance model does not inheret `add_header` into a block where another `add_header` is defined
+                        // add all the headers inside a block where another `add_header` is defined
+                        addSecurityHeaders()
+                        addCorsHeaders()
+                        self.raw(`
+                        add_header 'Access-Control-Max-Age' 1728000;
+                        add_header 'Content-Type' 'text/plain; charset=utf-8';
+                        add_header 'Content-Length' 0;
+                        return 204;
+                        `)
+                    })
+                    addSecurityHeaders()
+                    addCorsHeaders()
                 })
             }
         })
@@ -1449,7 +1454,7 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
         // status are only exposed via the lb using the lb routes
         lbHiddenPrefix := self.servicesConfig.getLbHiddenPrefix()
         if lbHiddenPrefix != "" {
-            parts = append(parts, fmt.Sprintf("--status-prefix=/%s", lbHiddenPrefix))
+            parts = append(parts, fmt.Sprintf("--status-prefix=%s", lbHiddenPrefix))
         }
 
         parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))

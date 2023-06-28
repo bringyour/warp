@@ -34,6 +34,28 @@ type WarpState struct {
     versionSettings *VersionSettings
 }
 
+func (self *WarpState) getVersion(build bool, docker bool) string {
+    stagedVersion := self.versionSettings.StagedVersion
+
+    var version string
+    if stagedVersion == nil || *stagedVersion == "local" {
+        version = getLocalVersion()
+    } else {
+        version = *stagedVersion
+    }
+
+    if build {
+        buildTimestamp := time.Now().UnixMilli()
+        version = fmt.Sprintf("%s+%d", version, buildTimestamp)
+    }
+
+    if docker {
+        version = convertVersionToDocker(version)
+    }
+
+    return version
+}
+
 
 type WarpSettings struct {
     DockerNamespace *string `json:"dockerNamespace,omitempty"`
@@ -50,18 +72,21 @@ func (self *WarpSettings) RequireDockerNamespace() string {
 	}
 	return *self.DockerNamespace
 }
+
 func (self *WarpSettings) RequireDockerHubUsername() string {
 	if self.DockerHubUsername == nil {
 		panic("WARP_DOCKER_HUB_USERNAME is not set. Use warpctl init.")
 	}
 	return *self.DockerHubUsername
 }
+
 func (self *WarpSettings) RequireDockerHubToken() string {
 	if self.DockerHubToken == nil {
 		panic("WARP_DOCKER_HUB_TOKEN is not set. Use warpctl init.")
 	}
 	return *self.DockerHubToken
 }
+
 func (self *WarpSettings) RequireVaultHome() string {
 	if self.VaultHome == nil {
 		warpHome := os.Getenv("WARP_HOME")
@@ -73,6 +98,7 @@ func (self *WarpSettings) RequireVaultHome() string {
 	}
 	return *self.VaultHome
 }
+
 func (self *WarpSettings) RequireConfigHome() string {
 	if self.ConfigHome == nil {
 		warpHome := os.Getenv("WARP_HOME")
@@ -84,6 +110,7 @@ func (self *WarpSettings) RequireConfigHome() string {
 	}
 	return *self.ConfigHome
 }
+
 func (self *WarpSettings) RequireSiteHome() string {
 	if self.ConfigHome == nil {
 		warpHome := os.Getenv("WARP_HOME")
@@ -95,8 +122,6 @@ func (self *WarpSettings) RequireSiteHome() string {
 	}
 	return *self.SiteHome
 }
-
-
 
 
 type VersionSettings struct {
@@ -186,31 +211,6 @@ func getLocalVersion() string {
 }
 
 
-func (self *WarpState) getVersion(build bool, docker bool) string {
-    // state := getWarpState()
-
-    stagedVersion := self.versionSettings.StagedVersion
-
-    var version string
-    if stagedVersion == nil || *stagedVersion == "local" {
-        version = getLocalVersion()
-    } else {
-        version = *stagedVersion
-    }
-
-    if build {
-        buildTimestamp := time.Now().UnixMilli()
-        version = fmt.Sprintf("%s+%d", version, buildTimestamp)
-    }
-
-    if docker {
-        version = convertVersionToDocker(version)
-    }
-
-    return version
-}
-
-
 type DockerHubLoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -253,8 +253,6 @@ type DockerHubClient struct {
 }
 
 func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
-	// state := getWarpState()
-
 	httpClient := &http.Client{}
 
     dockerHubLoginRequest := DockerHubLoginRequest{
@@ -265,7 +263,6 @@ func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
     if err != nil {
     	panic(err)
     }
-    fmt.Printf("LOGIN JSON %s\n", loginRequestJson)
     loginRequest, err := http.NewRequest(
     	"POST",
     	"https://hub.docker.com/v2/users/login",
@@ -290,8 +287,6 @@ func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
     	panic(err)
     }
 
-    fmt.Printf("LOGIN GOT RESPONSE %s\n", dockerHubLoginResponse.Token)
-
     return &DockerHubClient{
     	warpState: warpState,
     	httpClient: httpClient,
@@ -300,7 +295,6 @@ func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
 }
 
 func (self *DockerHubClient) AddAuthorizationHeader(request *http.Request) {
-	// fmt.Printf("Authorization: Bearer %s\n", self.token)
 	request.Header.Add("Authorization", fmt.Sprintf("Bearer %s", self.token))
 }
 
@@ -320,24 +314,11 @@ type ServiceMeta struct {
     envVersionMetas map[string]map[string]*VersionMeta
 }
 
-
-type VersionMeta struct {
-    env string
-    service string
-    versions []*semver.Version
-    latestBlocks map[string]*semver.Version
-}
-
-
 func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
-	// state := getWarpState()
-    // client := NewDockerHubClient(state)
-
     repoNames := []string{}
 
     url := self.NamespaceUrl("/repositories")
     for {
-    	// fmt.Printf("%s\n", url)
 	    reposRequest, err := http.NewRequest("GET", url, nil)
 	    if err != nil {
 	    	panic(err)
@@ -360,8 +341,7 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
 	    }
 
 		for _, result := range dockerHubReposResponse.Results {
-			fmt.Printf("SCANNING RESULT %s\n", result)
-			if /*result.RepositoryType == "image" &&*/ result.StatusDescription == "active" {
+			if result.StatusDescription == "active" {
 				repoNames = append(repoNames, result.Name)
 			}
 		}
@@ -372,7 +352,7 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
 		url = *dockerHubReposResponse.NextUrl
 	}
 
-	fmt.Printf("FOUND REPO NAMES %s\n", repoNames)
+	fmt.Printf("Found repo names %s\n", strings.Join(repoNames, ", "))
 
 	envVersionMetas := map[string]map[string]*VersionMeta{}
 
@@ -418,17 +398,20 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
 }
 
 
-func (self *DockerHubClient) getVersionMeta(env string, service string) *VersionMeta {
-	// state := getWarpState()
-    // client := NewDockerHubClient(state)
+type VersionMeta struct {
+    env string
+    service string
+    versions []*semver.Version
+    latestBlocks map[string]*semver.Version
+}
 
+func (self *DockerHubClient) getVersionMeta(env string, service string) *VersionMeta {
 	versionsMap := map[*semver.Version]bool{}
 	latestBlocks := map[string]*semver.Version{}
 
 	latestRegex := regexp.MustCompile("^(.*)-latest$")
 
 	url := self.NamespaceUrl(fmt.Sprintf("/repositories/%s-%s/images", env, service))
-	fmt.Printf("URL %s\n", url)
 	for {
 	    imagesRequest, err := http.NewRequest("GET", url, nil)
 	    if err != nil {
@@ -449,22 +432,15 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
 	    if err != nil {
 	    	panic(err)
 	    }
-
-	    fmt.Printf("Response %s\n", body)
-
 	    
 		for _, result := range dockerHubImagesResponse.Results {
 			if result.Status == "active" {
 				imageVersions := []*semver.Version{}
 
-				fmt.Printf("TAGS %s\n", result.Tags)
-
 				for _, tag := range result.Tags {
 					if tag.IsCurrent {
-						// fmt.Printf("tag %s %t\n", tag.Tag, tag.IsCurrent)
 						versionStr := convertVersionFromDocker(tag.Tag)
 						if version, err := semver.NewVersion(versionStr); err == nil {
-							// fmt.Printf("v %s %t\n", version, tag.IsCurrent)
 							imageVersions = append(imageVersions, version)
 							versionsMap[version] = true
 						}
@@ -475,7 +451,6 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
 				for _, tag := range result.Tags {
 					if tag.IsCurrent {
 						if groups := latestRegex.FindStringSubmatch(tag.Tag); groups != nil {
-							fmt.Printf("MATCHED LATEST VERSION AGAINST %s\n", tag.Tag)
 							block := groups[1]
 							// if len(imageVersions) == 0,
 							// 	  the latest tag does not have an associated version
@@ -507,12 +482,7 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
 
 func pollStatusUntil(env string, service string, sampleCount int, statusUrls []string, targetVersion string) {
 	for {
-		fmt.Printf("POLL STATUS UNTIL %s -> %s\n", statusUrls, targetVersion)
-
         statusVersions := sampleStatusVersions(20, statusUrls)
-
-        fmt.Printf("POLL STATUS SAMPLED VERSIONS %s\n", statusVersions)
-
 
         serviceCount := 0
         serviceVersions := []*semver.Version{}
@@ -568,13 +538,6 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
 }
 
 
-type StatusVersions struct {
-	versions map[*semver.Version]int
-	configVersions map[*semver.Version]int
-	errors map[string]int
-}
-
-
 type WarpStatusResponse struct {
 	Version string `json:"version"`
 	ConfigVersion string `json:"configVersion"`
@@ -587,6 +550,12 @@ func (self *WarpStatusResponse) IsError() bool {
 	return errorRegex.MatchString(self.Status)
 }
 
+
+type StatusVersions struct {
+	versions map[*semver.Version]int
+	configVersions map[*semver.Version]int
+	errors map[string]int
+}
 
 func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions {
 	resultsMutex := sync.Mutex{}
@@ -803,6 +772,7 @@ func convertVersionToDocker(version string) string {
 	}
 	return strings.Join(parts, "-")
 }
+
 
 func convertVersionFromDocker(dockerVersion string) string {
 	// if two tailing -, replace last with + 

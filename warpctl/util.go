@@ -14,6 +14,9 @@ import (
 	"runtime"
 	"sync"
 	"time"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"golang.org/x/exp/slices"
 
@@ -22,6 +25,7 @@ import (
 
 
 
+/*
 type CommandList struct {
 	commands []*exec.Cmd
 	ignore map[int]bool
@@ -69,8 +73,23 @@ func (self *CommandList) Run() {
 		}
 	}
 }
+*/
 
 
+
+func runAndLog(cmd *exec.Cmd) error {
+	err := cmd.Run()
+	if err == nil {
+		Err.Printf("%s (exited 0)\n", cmd)
+	} else {
+	    if exitError, ok := err.(*exec.ExitError); ok {
+			Err.Printf("%s (exited %d)\n", cmd, exitError.ExitCode())
+	    } else {
+	    	Err.Printf("%s (error %s)\n", cmd, err)
+	    }
+	}
+	return err
+}
 
 
 func sudo(name string, args ...string) *exec.Cmd {
@@ -257,6 +276,28 @@ func semverSortWithBuild(versions []*semver.Version) {
 }
 
 
+
+func mapStr[KT comparable, VT any](m map[KT]VT) string {
+	str := func(a any)(string) {
+		switch v := a.(type) {
+		case int:
+			return strconv.Itoa(v)
+		case string:
+			return v
+		default:
+			return fmt.Sprintf("%s", v)
+		}
+	}
+	pairStrs := []string{}
+	for k, v := range m {
+		pairStr := fmt.Sprintf("%s:%s", str(k), str(v))
+		pairStrs = append(pairStrs, pairStr)
+	}
+	return fmt.Sprintf("{%s}", strings.Join(pairStrs, ", "))
+}
+
+
+
 type Event struct {
 	mutex sync.Mutex
 	value bool
@@ -290,6 +331,31 @@ func (self *Event) WaitForSet(timeout time.Duration) bool {
 		}
 	}
 	return self.IsSet()
+}
+
+func (self *Event) SetOnSignals(signalValues ...syscall.Signal) func() {
+	stopSignal := make(chan os.Signal, 2)
+	for _, signalValue := range signalValues {
+	    signal.Notify(stopSignal, signalValue)
+	}
+    go func() {
+    	signalWatcher:
+    	for {
+	    	select {
+			case sig, ok := <- stopSignal:
+				if ok {
+					Err.Printf("Stop signal detected (%d).\n", sig)
+					self.Set()
+				} else {
+					break signalWatcher
+				}
+			}
+		}
+    }()
+    return func(){
+    	signal.Stop(stopSignal)
+    	close(stopSignal)
+    }
 }
 
 

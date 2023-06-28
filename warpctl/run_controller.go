@@ -16,26 +16,12 @@ import (
 	"encoding/json"
 	"regexp"
 	"syscall"
-	"os/signal"
+	// "os/signal"
 
+	"golang.org/x/exp/maps"
 
 	"github.com/coreos/go-semver/semver"
 )
-
-
-// Create docker networks as follows:
-// FOR NON-SERVICE NETWORKS DISABLE MASQ
-// docker network create --attachable --opt 'com.docker.network.bridge.name=warp1' --opt 'com.docker.network.bridge.enable_ip_masquerade=false' warp1 
-// docker network create --attachable --opt 'com.docker.network.bridge.name=warpsservices' warpsservices
-
-
-
-// FIXME
-// FIXME at run pass these in as env vars
-// WARP_ENV
-// WARP_VERSION
-// WARP_CONFIG_VERSION
-
 
 
 const (
@@ -75,52 +61,16 @@ type RunWorker struct {
 	deployedVersion *semver.Version
 	deployedConfigVersion *semver.Version
 
-	// active bool
-	// interrupt bool
-
-	// FIXME should this be a context?
 	quitEvent *Event
 }
-
-
-
 
 func (self *RunWorker) Run() {
 	// on start, deploy the latest version and start the watcher loop
 
-	// self.active = true
-	// self.interrupt = make(chan bool, 1)
-
-	// look at sync.Cond
-
 	self.quitEvent = NewEvent()
 
-
-	stopSignal := make(chan os.Signal, 2)
-    signal.Notify(stopSignal, syscall.SIGQUIT)
-    signal.Notify(stopSignal, syscall.SIGTERM)
-    defer func(){
-    	signal.Stop(stopSignal)
-    	close(stopSignal)
-    }()
-    go func() {
-    	signalWatcher:
-    	for {
-	    	select {
-			case sig, ok := <- stopSignal:
-				if ok {
-					fmt.Printf("Stop signal detected (%d).\n", sig)
-					self.quitEvent.Set()
-				} else {
-					break signalWatcher
-				}
-				// self.active = false
-				// self.interrupt <- true
-			}
-		}
-    }()
-
-
+	closeFn := self.quitEvent.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM)
+	defer closeFn()
 
 	announceRunEnter()
 	defer announceRunExit()
@@ -138,7 +88,7 @@ func (self *RunWorker) Run() {
 	// watch for new versions until killed
 	for !self.quitEvent.IsSet() {
 		latestVersion, latestConfigVersion := self.getLatestVersion()
-		fmt.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
+		Err.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
 
 		deployVersion := func()(bool) {
 			if latestVersion == nil {
@@ -164,25 +114,29 @@ func (self *RunWorker) Run() {
 			self.deployedVersion = latestVersion
 			self.deployedConfigVersion = latestConfigVersion
 
-			fmt.Printf("DEPLOY VERSION %s %s\n", self.deployedVersion, self.deployedConfigVersion)
+			Err.Printf("Deploy version=%s, configVersion=%s\n", self.deployedVersion, self.deployedConfigVersion)
 			func() {
 				announceRunStart()
 				defer func() {
 					if err := recover(); err != nil {
-						fmt.Printf("DEPLOY ERROR %s %s %s\n", self.deployedVersion, self.deployedConfigVersion, err)
+						Err.Printf("Deploy error version=%s, configVersion=%s: %s\n", self.deployedVersion, self.deployedConfigVersion, err)
 						announceRunError()
 					}
 				}()
 				err := self.deploy()
 				if err != nil {
-					fmt.Printf("DEPLOY FAILED %s %s %s\n", self.deployedVersion, self.deployedConfigVersion, err)
+					Err.Printf("Deploy fail version=%s, configVersion=%s: %s\n", self.deployedVersion, self.deployedConfigVersion, err)
 					announceRunFail()
 					// at this point, the previous version is still running
 				} else {
-					fmt.Printf("DEPLOY SUCCESS %s %s\n", self.deployedVersion, self.deployedConfigVersion)
+					Err.Printf("Deploy success version=%s, configVersion=%s\n", self.deployedVersion, self.deployedConfigVersion)
 					announceRunSuccess()
 				}
 			}()
+			// prune stopped containers
+			// this may not catch the draining containers from this epoch
+			// it runs after each deploy to bound the number of stopped containers
+			self.prune()
 		} else if latestVersion == nil {
 			announceRunWaitForVersion()
 		} else if latestConfigVersion == nil {
@@ -190,26 +144,11 @@ func (self *RunWorker) Run() {
 		}
 
 		self.quitEvent.WaitForSet(5 * time.Second)
-
-		// if !active {
-		// 	break watcher
-		// }
-		// select {
-		// case <- self.interrupt:
-		// 	continue watcher
-		// case <-time.After(5 * time.Second):
-		// 	continue watcher
-		// }
 	}
-
 }
-
 
 // service version, config version
 func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
-
-	
-
 	versionMeta := self.dockerHubClient.getVersionMeta(self.env, self.service)
 	latestVersion := versionMeta.latestBlocks[self.block]
 
@@ -243,65 +182,37 @@ func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
     return latestVersion, latestConfigVersion
 }
 
-
-
-// docker kill --signal="<signal>"
-
-
-
-
 func (self *RunWorker) initRoutingTable() {
+	// ** important: restarting warpctl should not interrupt running services **
 	// this does not remove routes/tables or rules to avoid interrupting running services
 	// instead missing rules are added
 
-
-	// cmds := NewCommandList()
-
-	// cmds.sudo(
-	// 	"ip", "route", "flush",
-	// 	"table", self.routingTable.tableName,
-	// ).ignoreErrors()
-
-	// sudo ip route list table 100
-	// sudo ip rule list table 100
-
-	// add routes for:
-	// - interface (default)
-	// - docker services interface
-	// - docker interface
-
 	tableNumberStr := strconv.Itoa(self.routingTable.tableNumber)
 
-	sudo(
+	runAndLog(sudo(
 		"ip", "route", "replace", self.routingTable.interfaceIpv4Subnet, 
 		"dev", self.routingTable.interfaceName, 
 		"src", self.routingTable.interfaceIpv4, 
 		"table", tableNumberStr,
-	).Run()
-    sudo(
+	))
+    runAndLog(sudo(
     	"ip", "route", "replace", self.servicesDockerNetwork.interfaceIpv4Subnet, 
     	"dev", self.servicesDockerNetwork.interfaceName,
     	"src", self.servicesDockerNetwork.interfaceIpv4,
     	"table", tableNumberStr,
-    ).Run()
-   	sudo(
+    ))
+   	runAndLog(sudo(
    		"ip", "route", "replace", self.dockerNetwork.interfaceIpv4Subnet, 
     	"dev", self.dockerNetwork.interfaceName,
     	"src", self.dockerNetwork.interfaceIpv4,
     	"table", tableNumberStr,
-    ).Run()
-   	sudo(
+    ))
+   	runAndLog(sudo(
    		"ip", "route", "add", "default",
    		"via", self.routingTable.interfaceIpv4Gateway,
    		"dev", self.routingTable.interfaceName,
    		"table", tableNumberStr,
-   	).Run()
-
-    // use the table from:
-    // - interface ip (sockets bound to the interface)
-    // - docker interface subnet (sockets in docker containers in the network)
-
-
+   	))
 
     /*
     32737:	from 172.19.0.0/16 lookup warp1
@@ -324,25 +235,26 @@ func (self *RunWorker) initRoutingTable() {
 		}
 	}
 
+	// lookup to the table for packets from these sources:
+    // - interface ip (sockets bound to the interface)
+    // - docker interface subnet (sockets in docker containers in the network)
 	for _, from := range []string{
 		self.routingTable.interfaceIpv4Gateway,
 		self.dockerNetwork.interfaceIpv4Subnet,
 	} {
 		if tableName, ok := ipRuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {
-			sudo(
+			runAndLog(sudo(
 		   		"ip", "rule", "add",
 		   		"from", from,
 		   		"table", tableNumberStr,
-		   	).Run()
+		   	))
 		}
 	}
-
 }
-
-
 
 func (self *RunWorker) iptablesChainName() string {
 	// iptables target names are 28 chars max
+	maxLen := 28
 
 	maxServiceLen := 10
 	var shortService string
@@ -371,22 +283,28 @@ func (self *RunWorker) iptablesChainName() string {
 		shortBlock = self.block
 	}
 
-	return fmt.Sprintf(
+	chainName := fmt.Sprintf(
 		"WARP-%s-%s-%s",
 		strings.ToUpper(self.env),
 		strings.ToUpper(shortService),
 		strings.ToUpper(shortBlock),
 	)
+	if maxLen < len(chainName) {
+		panic(fmt.Sprintf("iptables chain name cannot exceed %d chars", maxLen))
+	}
+	return chainName
 }
 
-// restarting warpctl should not break the existing routing
 func (self *RunWorker) initBlockRedirect() {
+	// ** important: restarting warpctl should not interrupt running services **
+	// add rules if they do not already exists
+
 	chainName := self.iptablesChainName()
 
 	// ignore errors
-	sudo(
+	runAndLog(sudo(
 		"iptables", "-t", "nat", "-N", chainName,
-	).Run()
+	))
  
 	chainCmd := func(op string, entryChainName string) *exec.Cmd {
 		cmd := sudo(
@@ -394,35 +312,37 @@ func (self *RunWorker) initBlockRedirect() {
 			"-m", "addrtype", "--dst-type", "LOCAL",
 			"-j", chainName,
 		)
-		fmt.Printf("%s\n", cmd)
 		return cmd
 	}
 
 	// apply chain to external traffic to local
 	// do not add if already exists
-	if err := chainCmd("-C", "PREROUTING").Run(); err != nil {
-		if err := chainCmd("-I", "PREROUTING").Run(); err != nil {
+	if err := runAndLog(chainCmd("-C", "PREROUTING")); err != nil {
+		if err := runAndLog(chainCmd("-I", "PREROUTING")); err != nil {
 			panic(err)
 		}
 	}
 
 	// apply chain to local traffic to local
 	// do not add if already exists
-	if err := chainCmd("-C", "OUTPUT").Run(); err != nil {
-		if err := chainCmd("-I", "OUTPUT").Run(); err != nil {
+	if err := runAndLog(chainCmd("-C", "OUTPUT")); err != nil {
+		if err := runAndLog(chainCmd("-I", "OUTPUT")); err != nil {
 			panic(err)
 		}
 	}
 }
 
-
 func (self *RunWorker) deploy() error {
 	externalPortsToInternalPort, servicePortsToInternalPort := self.waitForDeployPorts()
-	fmt.Printf("Ports %s, %s\n", externalPortsToInternalPort, servicePortsToInternalPort)
+	Err.Printf(
+		"Ports %s, %s\n",
+		mapStr(externalPortsToInternalPort),
+		mapStr(servicePortsToInternalPort),
+	)
 
     deployedContainerId, err := self.startContainer(servicePortsToInternalPort)
     if err != nil {
-    	fmt.Printf("Start container failed %s\n", err)
+    	Err.Printf("Start container failed: %s\n", err)
     	return err
     }
     success := false
@@ -456,7 +376,7 @@ func (self *RunWorker) deploy() error {
     		}
     	}
     }
-    fmt.Printf("DEPLOY FOUND OVERLAPPING CONTAINER IDS %s\n", containerIds)
+    Err.Printf("Found overlapping containers %s\n", strings.Join(maps.Keys(containerIds), ", "))
     for containerId, _ := range containerIds {
     	if containerId != deployedContainerId {
 		    go NewKillWorker(containerId).Run()
@@ -474,7 +394,6 @@ func (self *RunWorker) waitForDeployPorts() (map[int]int, map[int]int) {
 
 		runningContainers, err := self.findRunningContainers()
 		if err != nil {
-			fmt.Printf("FIND RUNNING CONTAINERS ERROR %s\n", err)
 			panic(err)
 		}
 		for externalPort, internalPorts := range self.portBlocks.externalsToInternals {
@@ -488,16 +407,6 @@ func (self *RunWorker) waitForDeployPorts() (map[int]int, map[int]int) {
 
 		if len(externalPortsToInternalPort) < len(self.portBlocks.externalsToInternals) {
 			self.quitEvent.WaitForSet(5 * time.Second)
-
-			// if !active {
-			// 	break poll
-			// }
-			// select {
-			// case <- self.interrupt:
-			// 	continue poll
-			// case <-time.After(5 * time.Second):
-			// 	continue poll
-			// }
 		} else {
 			servicePortsToInternalPort := map[int]int{}
 			for externalPort, servicePort := range self.portBlocks.externalsToService {
@@ -532,16 +441,15 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 		convertVersionToDocker(self.deployedVersion.String()),
 	)
 
-	fmt.Printf("Running docker pull %s\n", imageName)
-
 	pullCmd := docker("pull", imageName)
-	err := pullCmd.Run()
+	err := runAndLog(pullCmd)
 	if err != nil {
 		return "", err
 	}
 
-
 	args := []string{
+		"--label", fmt.Sprintf("%s-%s-%s", self.env, self.service, self.block),
+		"--label", fmt.Sprintf("version=%s", convertVersionToDocker(self.deployedVersion.String())),
 		"--name", containerName,
 		"-d",
 		"--restart=on-failure",
@@ -643,14 +551,9 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 		args = append(args, fmt.Sprintf("/srv/warp/nginx.conf/%s.conf", self.block))
 	}
 
-	fmt.Printf("Running docker %s (%s)\n", strings.Join(args, " "), args)
-
 	runCmd := docker("run", args...)
 
-	fmt.Printf("%s\n", runCmd)
-
 	out, err := runCmd.Output()
-	fmt.Printf("COMMAND OUTPUT %s %s\n", out, err)
 	if err != nil {
 		return "", err
 	}
@@ -678,7 +581,6 @@ func (self *RunWorker) pollContainerStatus(servicePortsToInternalPort map[int]in
 	}
 }
 
-
 func (self *RunWorker) pollBasicContainerStatus(servicePortsToInternalPort map[int]int, timeout time.Duration) error {
 	httpPort, ok := servicePortsToInternalPort[80]
 	if !ok {
@@ -696,21 +598,19 @@ func (self *RunWorker) pollBasicContainerStatus(servicePortsToInternalPort map[i
 			routePrefix = fmt.Sprintf("/%s", self.statusPrefix)
 		}
 		statusUrl := fmt.Sprintf("http://127.0.0.1:%d%s/status", httpPort, routePrefix)
-		fmt.Printf("POLL ONE %s\n", statusUrl)
+		Err.Printf("Poll %s\n", statusUrl)
 
 		statusRequest, err := http.NewRequest("GET", statusUrl, nil)
 		if err != nil {
 			return err
 		}
-		// FIXME pass the domain as an argument to runworker
-		// FIXME pass whether the /status route is exposed to runworker
 		statusRequest.Host = fmt.Sprintf("%s-%s.%s", self.env, self.service, self.domain)
 		statusResponse, err := client.Do(statusRequest)
 		if err != nil {
 			return err
 		}
 		body, err := io.ReadAll(statusResponse.Body)
-		fmt.Printf("POLL STATUS %s %s\n", body, err)
+		Err.Printf("Poll result %s (%s)\n", body, err)
 	    if err != nil {
 	    	return err
 	    }
@@ -739,7 +639,6 @@ func (self *RunWorker) pollBasicContainerStatus(servicePortsToInternalPort map[i
 	panic("Could not poll container status.")
 }
 
-
 func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int) {
 	chainName := self.iptablesChainName()
 
@@ -753,13 +652,12 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int) {
 
 	for externalPort, internalPort := range externalPortsToInternalPort {
 		// do not add if already exists
-		if err := redirectCmd("-C", externalPort, internalPort).Run(); err != nil {
-		    if err := redirectCmd("-I", externalPort, internalPort).Run(); err != nil {
+		if err := runAndLog(redirectCmd("-C", externalPort, internalPort)); err != nil {
+		    if err := runAndLog(redirectCmd("-I", externalPort, internalPort)); err != nil {
 		    	panic(err)
 		    }
 		}
 	}
-
 
 	// find existing redirects and remove those for the owned external ports
 	existingExternalPortsToInternalPorts := map[int]map[int]bool{}
@@ -785,14 +683,15 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int) {
 		}
 	}
 
-	fmt.Printf("REDIRECT EXISTING EXTERNAL PORTS TO INTERNAL PORTS %s\n", existingExternalPortsToInternalPorts)
+	Err.Printf("Remove existing redirects %s\n", existingExternalPortsToInternalPorts)
 
 	for externalPort, internalPort := range externalPortsToInternalPort {
 		if existingInternalPortsMap, ok := existingExternalPortsToInternalPorts[externalPort]; ok {
 			for existingInternalPort, _ := range existingInternalPortsMap {
 				if internalPort != existingInternalPort {
 					for {
-		    			if err := redirectCmd("-D", externalPort, existingInternalPort).Run(); err != nil {
+						cmd := redirectCmd("-D", externalPort, existingInternalPort)
+		    			if err := runAndLog(cmd); err != nil {
 		    				break
 		    			}
 		    		}
@@ -802,23 +701,17 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int) {
 	}
 }
 
-
-
-
-/*
-type ContainerList = []Container
-
-Container
-Id string
-HostConfig *HostConfig
-
-HostConfig
-PortBindings map[string][]*PortBinding
-
-PortBinding
-HostIp string
-HostPort string
-*/
+func (self *RunWorker) prune() {
+	// ignore errors
+	cmd := docker(
+		"container",
+		"prune",
+		"-f",
+		// restict to containers labeled with <env>-<service>-<block>
+		"--filter", fmt.Sprintf("label=%s-%s-%s", self.env, self.service, self.block),
+	)
+	runAndLog(cmd)
+}
 
 
 type ContainerList = []*Container
@@ -837,13 +730,11 @@ type PortBinding struct {
 	HostPort string `json:"HostPort"`
 }
 
-
-// map internal port to running container_id for all running containers
+// internal port -> running container_id for all running containers
 func (self *RunWorker) findRunningContainers() (map[int]string, error) {
 	psCmd := docker("ps", "--format", "{{.ID}}")
 	out, err := psCmd.Output()
 	if err != nil {
-		fmt.Printf("RUNNING CONTAINERS ERROR 1 %s\n", err)
 		return nil, err
 	}
 
@@ -855,21 +746,16 @@ func (self *RunWorker) findRunningContainers() (map[int]string, error) {
 
 	containerIds := strings.Split(outStr, "\n")
 	inspectCmd := docker("inspect", containerIds...)
-	fmt.Printf("RUNNING CONTAINERS INSPECT %s (%s)\n", inspectCmd, containerIds)
 	out, err = inspectCmd.Output()
 	if err != nil {
-		fmt.Printf("RUNNING CONTAINERS ERROR 2 %s\n", err)
 		return nil, err
 	}
 
 	var containerList ContainerList
 	err = json.Unmarshal(out, &containerList)
 	if err != nil {
-		fmt.Printf("RUNNING CONTAINERS ERROR 3 %s\n", err)
 		return nil, err
 	}
-
-	fmt.Printf("RUNNING CONTAINERS LIST %s\n", containerList)
 
 	runningContainers := map[int]string{}
 
@@ -885,19 +771,14 @@ func (self *RunWorker) findRunningContainers() (map[int]string, error) {
 		}
 	}
 
-	fmt.Printf("RUNNING CONTAINERS %s\n", runningContainers)
-
 	return runningContainers, nil
 }
-
-
 
 
 type PortBlocks struct {
 	externalsToInternals map[int][]int
 	externalsToService map[int]int
 }
-
 
 // service:external::p-P,p;service:external:...
 func parsePortBlocks(portBlocksStr string) *PortBlocks {
@@ -937,12 +818,10 @@ type NetworkInterface struct {
 	interfaceIpv4Gateway string
 }
 
-
 type DockerNetwork struct {
 	networkName string
 	NetworkInterface
 }
-
 
 func parseDockerNetwork(dockerNetworkStr string) *DockerNetwork {
 	// assume the network name is the interface name
@@ -965,22 +844,6 @@ func parseDockerNetwork(dockerNetworkStr string) *DockerNetwork {
 		NetworkInterface: *networkInterface,
 	}
 }
-
-/*
-DockerNetworks = []DockerNetwork
-
-DockerNetwork
-Name string
-IPAM *DockerNetworkIpam
-
-DockerNetworkIpam
-Config []*DockerNetworkIpConfig
-
-DockerNetworkIpConfig
-Subnet
-Gateway
-
-*/
 
 
 type RoutingTable struct {
@@ -1014,16 +877,11 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
 			}
 		}
     }
-
     
 	tableName, ok := tableNames[tableNumber]
 	if !ok {
 		panic(fmt.Sprintf("Routing table %d does not exist.", tableNumber))
 	}
-
-
-	// ifconfig
-	// see https://github.com/golang/go/issues/12551
 
 	networkInterfaces, err := getNetworkInterfaces(interfaceName)
 	if err != nil {
@@ -1037,7 +895,6 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
 	}
 	networkInterface := networkInterfaces[0]
 
-
 	return &RoutingTable{
 		interfaceName: interfaceName,
 		tableNumber: tableNumber,
@@ -1049,8 +906,6 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
 
 func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, error) {
 	// see https://github.com/golang/go/issues/12551
-
-	fmt.Printf("GET NETWORK INTERFACES %s\n", interfaceName)
 
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
@@ -1066,20 +921,12 @@ func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, error) {
 
     for _, addr := range addrs {
         if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-        	// gatewayIp, err := cidr.Host(netw, 1)
-        	// if err != nil {
-        	// 	return nil, err
-        	// }
-        	// gatewayIp := net.IP(networkIp)
-        	// ipnetgen.Increment(gatewayIp)
-
         	zeroedIpNet := net.IPNet{
         		IP: ipNet.IP.Mask(ipNet.Mask),
         		Mask: ipNet.Mask,
         	}
 
         	gateway := nextIp(zeroedIpNet, 1)
-
 
         	networkInterface := &NetworkInterface{
         		interfaceName: interfaceName,
@@ -1092,7 +939,7 @@ func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, error) {
     }
 
     for _, networkInterface := range networkInterfaces {
-    	fmt.Printf(
+    	Err.Printf(
     		"%s ipv4=%s ipv4_subnet=%s ipv4_gateway=%s\n",
     		networkInterface.interfaceName,
     		networkInterface.interfaceIpv4,
@@ -1101,12 +948,8 @@ func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, error) {
     	)
     }
 
-
-
 	return networkInterfaces, nil
 }
-
-
 
 
 type KillWorker struct {
@@ -1121,14 +964,14 @@ func NewKillWorker(containerId string) *KillWorker {
 
 func (self *KillWorker) Run() {
 	// ignore errors
-	docker(
+	runAndLog(docker(
 		"update", "--restart=no", self.containerId,
-	).Run()
+	))
 
 	// ignore errors
-	docker(
+	runAndLog(docker(
 		"stop", "container", "--time", "120", self.containerId,
-	).Run()
+	))
 }
 
 

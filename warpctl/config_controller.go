@@ -24,7 +24,6 @@ type ServicesConfig struct {
     Versions []*ServicesConfigVersion `yaml:"versions,omitempty"`
 }
 
-
 func (self *ServicesConfig) getHiddenPrefix() string {
     prefixes := self.getHiddenPrefixes()
     if 0 < len(prefixes) {
@@ -36,7 +35,6 @@ func (self *ServicesConfig) getHiddenPrefix() string {
 func (self *ServicesConfig) getHiddenPrefixes() []string {
     return self.HiddenPrefixes
 }
-
 
 func (self *ServicesConfig) getLbHiddenPrefix() string {
     prefixes := self.getLbHiddenPrefixes()
@@ -59,8 +57,6 @@ func (self *ServicesConfig) isTlsWildcard() bool {
     }
     return true
 }
-
-
 
 
 type ServicesConfigVersion struct {
@@ -134,8 +130,6 @@ func (self *ServiceConfig) includesHost(host string) bool {
 }
 
 
-
-
 type LbBlock struct {
     DockerNetwork string `yaml:"docker_network,omitempty"`
     ConcurrentClients int `yaml:"concurrent_clients,omitempty"`
@@ -164,18 +158,7 @@ type RateLimit struct {
 }
 
 
-
-
-
-
-
-
-
-
-
-// load from the vaulthome
 func getServicesConfig(env string) *ServicesConfig {
-
     state := getWarpState()
 
     servicesConfigPath := filepath.Join(
@@ -211,10 +194,6 @@ func getServicesConfig(env string) *ServicesConfig {
 }
 
 
-
-
-
-
 // union lb and service blocks
 type BlockInfo struct {
     service string
@@ -225,7 +204,6 @@ type BlockInfo struct {
     interfaceName string
     lbBlock *LbBlock
 }
-
 
 
 // service -> block -> blockinfo
@@ -281,8 +259,6 @@ func getBlocks(env string, service string) []string {
 }
 
 
-
-
 type PortBlock struct {
     service string
     block string
@@ -320,7 +296,7 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
 
 
     assignPortBlock := func(service string, block string, port int)(*PortBlock) {
-        fmt.Printf("ASSIGN PORT BLOCK %s %s %d\n", service, block, port)
+        Err.Printf("Assign port block %s %s %d\n", service, block, port)
         portBlock, ok := portBlocks[service][block][port]
         if ok {
             return portBlock
@@ -397,7 +373,7 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
         portBlock.externalPort = p
         portBlock.externalPortType = externalPortType
 
-        fmt.Printf("ASSIGNED EXTERNAL PORT %s %s %d -> %d\n", service, block, port, p)
+        Err.Printf("Assigned external port %s %s %d -> %d\n", service, block, port, p)
     }
     assignInternalPorts := func(
         service string,
@@ -487,7 +463,6 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
         assignedLbRoutingTables[rt] = block
     }
 
-
     // interate versions from last to first
     for i := len(servicesConfig.Versions) - 1; 0 <= i; i -= 1 {
         serviceConfigVersion := servicesConfig.Versions[i]
@@ -522,7 +497,12 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
                     )
 
                     for portType, ports := range lbConfig.AllPorts() {
-                        fmt.Printf("ASSIGNING PORTS %s %s (%s)\n", portType, ports, lbBlock.ExternalPorts)
+                        Err.Printf(
+                            "Assigning ports %s %s (%s)\n",
+                            portType,
+                            collapsePorts(ports),
+                            mapStr(lbBlock.ExternalPorts),
+                        )
                         for _, port := range ports {
                             assignExternalPort(
                                 "lb",
@@ -582,19 +562,11 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
 }
 
 
-
-
-
-
-
-
-
-
-
 func getDomain(env string) string {
     servicesConfig := getServicesConfig(env)
     return servicesConfig.Domain
 }
+
 
 func getHostnames(env string, envAliases []string) []string {
     servicesConfig := getServicesConfig(env)
@@ -649,6 +621,7 @@ func isExposed(env string, service string) bool {
     return serviceConfig.isExposed()
 }
 
+
 func isLbExposed(env string, service string) bool {
     if service == "lb" {
         return false
@@ -661,6 +634,7 @@ func isLbExposed(env string, service string) bool {
     }
     return serviceConfig.isLbExposed()
 }
+
 
 func isStandardStatus(env string, service string) bool {
     if service == "lb" {
@@ -675,19 +649,17 @@ func isStandardStatus(env string, service string) bool {
     return serviceConfig.isStandardStatus()
 }
 
+
 func getHiddenPrefix(env string) string {
     servicesConfig := getServicesConfig(env)
     return servicesConfig.getHiddenPrefix()
 }
 
+
 func getLbHiddenPrefix(env string) string {
     servicesConfig := getServicesConfig(env)
     return servicesConfig.getLbHiddenPrefix()
 }
-
-
-
-
 
 
 type NginxConfig struct {
@@ -696,15 +668,12 @@ type NginxConfig struct {
     servicesConfig *ServicesConfig
     portBlocks map[string]map[string]map[int]*PortBlock
     blockInfos map[string]map[string]*BlockInfo
-    // services []string
 
     relativeTlsPemPath string
     relativeTlsKeyPath string
 
     indent int
 
-    // lbBlockHost string
-    // lbBlockInterface string
     lbBlockInfo *BlockInfo
     configParts []string
 }
@@ -733,7 +702,6 @@ func NewNginxConfig(env string, envAliases []string) (*NginxConfig, error) {
     return nginxConfig, nil
 }
 
-
 func findLatestTls(domain string, wildcard bool) (relativeTlsPemPath string, relativeTlsKeyPath string, err error) {
     state := getWarpState()
     vaultHome := state.warpSettings.RequireVaultHome()
@@ -755,7 +723,7 @@ func findLatestTls(domain string, wildcard bool) (relativeTlsPemPath string, rel
     }
 
     hasTlsFiles := func(dirPath string)(bool) {
-        fmt.Printf("TLS SEARCHING %s\n", dirPath)
+        Err.Printf("Tls searching dir %s\n", dirPath)
         for _, fileName := range []string{pemFileName, keyFileName} {
             if _, err := os.Stat(filepath.Join(dirPath, keyDirName, fileName)); errors.Is(err, os.ErrNotExist) {
                 return false
@@ -814,7 +782,6 @@ func (self *NginxConfig) services() []string {
     return services
 }
 
-
 func (self *NginxConfig) raw(text string, data ...map[string]any) {
     configPart := indentAndTrimString(templateString(text, data...), self.indent)
     self.configParts = append(self.configParts, configPart)
@@ -835,7 +802,7 @@ func (self *NginxConfig) Generate() map[string]string {
     blockConfigs := map[string]string{}
 
     for block, blockInfo := range self.blockInfos["lb"] {
-        fmt.Printf("GENERATING FOR BLOCK %s\n", block)
+        Err.Printf("Generating for block %s\n", block)
         self.indent = 0
         self.configParts = []string{}
         self.lbBlockInfo = blockInfo
@@ -957,10 +924,7 @@ func (self *NginxConfig) addNginxConfig() {
 
     // FIXME stream block
     // FIXME for non-80 ports, for each service port, we would match the service port of the lb to the external ports
-    // 
 }
-
-
 
 func (self *NginxConfig) addUpstreamBlocks() {
     // service-block-<service>
@@ -970,8 +934,6 @@ func (self *NginxConfig) addUpstreamBlocks() {
         if !slices.Contains(self.servicesConfig.Versions[0].Services[service].Ports, 80) {
             continue
         }
-
-        fmt.Printf("PORT BLOCKS %s\n", self.portBlocks)
 
         blocks := maps.Keys(self.portBlocks[service])
         sort.Strings(blocks)
@@ -1040,8 +1002,6 @@ func (self *NginxConfig) addUpstreamBlocks() {
     }
 }
 
-
-
 func (self *NginxConfig) addLbBlock() {
     lbHosts := []string{}
 
@@ -1052,27 +1012,6 @@ func (self *NginxConfig) addLbBlock() {
         lbHostAlias := fmt.Sprintf("%s-lb.%s", env, self.servicesConfig.Domain)
         lbHosts = append(lbHosts, lbHostAlias)
     }
-
-    // self.raw(`
-    // server {
-    //     listen 80;
-    //     server_name {{.lbHostList}};
-    //     return 301 https://$host$request_uri;
-    // }
-    // server {
-    //     listen 443 ssl;
-    //     server_name {{.lbHostList}};
-    //     ssl_certificate     /srv/warp/vault/{{.relativeTlsPemPath}};
-    //     ssl_certificate_key /srv/warp/vault/{{.relativeTlsKeyPath}};
-
-    // {{.locations}}
-    // }
-    // `, map[string]any{
-    //  "lbHostList": strings.Join(lbHosts, " "),
-    //  "relativeTlsPemPath": self.relativeTlsPemPath,
-    //  "relativeTlsKeyPath": self.relativeTlsKeyPath,
-    //  "locations": strings.Join(locations, "\n"),
-    // })
 
     self.block("server", func() {
         self.raw(`
@@ -1313,7 +1252,6 @@ func (self *NginxConfig) addServiceBlocks() {
     }
 }
 
-
 func (self *NginxConfig) getLbRoutePrefixes() []string {
     routePrefixes := []string{}
     for _, prefix := range self.servicesConfig.getLbHiddenPrefixes() {
@@ -1337,8 +1275,6 @@ func (self *NginxConfig) getRoutePrefixes() []string {
     }
     return routePrefixes
 }
-
-
 
 
 type SystemdUnits struct {
@@ -1375,19 +1311,20 @@ func (self *SystemdUnits) Generate() map[string]map[string]map[string]*Units {
     return hostsServicesUnits
 }
 
-
 type Units struct {
     serviceUnit string
     drainUnit string
     shortBlock string
 }
 
-// FIXME
-// FIXME run should set common env vars
 func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Units {
     servicesUnits := map[string]map[string]*Units{}
 
-    // generate lb
+    // generate:
+    // - lb
+    // - config updater
+    // - services
+
     lbUnits := map[string]*Units{}
     for block, blockInfo := range self.blockInfos["lb"] {
         if blockInfo.host != host {
@@ -1508,7 +1445,7 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
     }
     servicesUnits["config-updater"] = configUpdaterUnits
 
-
+    // services
     for service, serviceBlockInfos := range self.blockInfos {
         switch service {
         case "lb", "config-updater":
@@ -1600,7 +1537,6 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
     return servicesUnits
 }
 
-
 func (self *SystemdUnits) serviceUnit(service string, block string, shortBlock string, cmdArgs []string) string {
     unit := templateString(`
     [Unit]
@@ -1644,7 +1580,9 @@ func (self *SystemdUnits) drainUnit(service string, block string, cmdArgs []stri
 // host -> commands
 func getDockerNetworkCommands(env string) map[string][][]string {
     /*
+    # LB block network
     docker network create --attachable --opt 'com.docker.network.bridge.name=warp1' --opt 'com.docker.network.bridge.enable_ip_masquerade=false' warp1 
+    # services network
     docker network create --attachable --opt 'com.docker.network.bridge.name=warpsservices' warpsservices
     */
 
@@ -1683,7 +1621,3 @@ func getDockerNetworkCommands(env string) map[string][][]string {
 
     return hostNetworkCommands
 }
-
-
-
-

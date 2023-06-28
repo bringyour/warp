@@ -15,6 +15,7 @@ import (
     // "os/signal"
     "errors"
     "regexp"
+    "log"
 
     "golang.org/x/exp/maps"
     "golang.org/x/exp/slices"
@@ -26,63 +27,16 @@ import (
 
 const WARP_VERSION = "0.0.1"
 
+var Out *log.Logger
+var Err *log.Logger
 
-// type CtlArgs struct {
-//   InitDockerHubToken string `docopt:"--dockerhub_token"`
-//   InitVaultHome string `docopt:"--vault_home"`
-//   InitKeysHome int `docopt:"--keys_home"`
-//   VersionNext string `docopt:"-next"`
-//   VersionBeta string `docopt:"-beta"`
-//   VersionRelease int `docopt:"-release"`
-//   DeployPercent string `docopt:"--percent"`
-//   CreateOutDir string `docopt:"--outdir"`
-// }
+func init() {
+    Out = log.New(os.Stdout, "", log.Ldate | log.Ltime | log.Lshortfile)
+    Err = log.New(os.Stderr, "", log.Ldate | log.Ltime | log.Lshortfile)
+}
 
 
-// the vault is updated outside of warp using for example ansible
-// the keys is updated with an updater service that writes new key versions into the key home
-// fixme have a "latest" file that points to the latest keys version
-
-// 1.2.3-beta+33234234
-
-
-// WARP_HOME=/srv/warp
-// WARP_VERSION_HOME
-
-// warpctl lb run <env> <interface_name>
-//  warpctl lb create-unit <env> <interface_name> [--target_warp_home=<target_warp_home>]
-//  warpctl key-updater run <env>
-//  warpctl key-updater create-unit <env>
-
-
-// README
-// docker containers run with /srv/warp/vault mounted read-only to the vault
-// /srv/warp/keys mounted read-only to the keys
-
-// lb does not have keys mounted
-
-// the keys-updater service has /srv/warp/keys mounted read+write
-// the keys-updater unit has no restart on exit
-
-// all other units require keys-updater first
-// lb requires all other units first
-
-
-// build populates WARP_VAULT_HOME, WARP_KEYS_HOME, WARP_ENV and WARP_NAMESPACE
-
-
-
-// all warp services should have a /status path with json: version, keys version, uptime
-
-
-
-
-// FIXME dns sync [--down_hosts=<hosts>]
-
-
-
-
-// needs a docker hub user access token
+// TODO dns tools
 func main() {
     usage := `Warp control. Fluid iteration and zero downtime continuous release.
 
@@ -104,7 +58,7 @@ Usage:
     warpctl deploy-beta <env> <service> [--percent=<percent>]
     warpctl deploy-release <env> <service> [--percent=<percent>]
     warpctl watch <env> <service>
-        [--target_version=<target_version>]
+        (latest-local | latest-beta | latest | <version>)
         (<blocklist> | --percent=<percent>)
     warpctl ls version [-b] [-d]
     warpctl ls services [<env>]
@@ -197,10 +151,10 @@ Options:
             lsVersions(opts)
         }
     } else if lb, _ := opts.Bool("lb"); lb {
-        if listBlocks, _ := opts.Bool("blocks"); listBlocks {
-            lbListBlocks(opts)
-        } else if listHosts, _ := opts.Bool("hosts"); listHosts {
-            lbListHosts(opts)
+        if blocks, _ := opts.Bool("blocks"); blocks {
+            lbLsBlocks(opts)
+        } else if hosts, _ := opts.Bool("hosts"); hosts {
+            lbLsHosts(opts)
         } else if createConfig, _ := opts.Bool("create-config"); createConfig {
             lbCreateConfig(opts)
         }
@@ -276,7 +230,7 @@ func stageVersion(opts docopt.Opts) {
         state.versionSettings.StagedVersion = &version
         setWarpState(state)
 
-        fmt.Printf("%s (local)\n", state.getVersion(false, false))
+        Out.Printf("%s (local)\n", state.getVersion(false, false))
     } else {
         sync, _ := opts.Bool("sync")
         next, _ := opts.Bool("next")
@@ -286,14 +240,14 @@ func stageVersion(opts docopt.Opts) {
 
             gitStashCommand := exec.Command("git", "stash", "-u")
             gitStashCommand.Dir = state.warpVersionHome
-            err = gitStashCommand.Run()
+            err = runAndLog(gitStashCommand)
             if err != nil {
                 panic(err)
             }
 
             gitPullCommand := exec.Command("git", "pull")
             gitPullCommand.Dir = state.warpVersionHome
-            err = gitPullCommand.Run()
+            err = runAndLog(gitPullCommand)
             if err != nil {
                 panic(err)
             }
@@ -338,7 +292,7 @@ func stageVersion(opts docopt.Opts) {
 
             gitAddCommand := exec.Command("git", "add", "version.json")
             gitAddCommand.Dir = state.warpVersionHome
-            err = gitAddCommand.Run()
+            err = runAndLog(gitAddCommand)
             if err != nil {
                 panic(err)
             }
@@ -346,35 +300,25 @@ func stageVersion(opts docopt.Opts) {
             message, _ := opts.String("--message")
             gitCommitCommand := exec.Command("git", "commit", "-m", message)
             gitCommitCommand.Dir = state.warpVersionHome
-            err = gitCommitCommand.Run()
+            err = runAndLog(gitCommitCommand)
             if err != nil {
                 panic(err)
             }
 
             gitPushCommand := exec.Command("git", "push")
             gitPushCommand.Dir = state.warpVersionHome
-            err = gitPushCommand.Run()
+            err = runAndLog(gitPushCommand)
             if err != nil {
                 panic(err)
             }
         }
 
-        fmt.Printf("%s\n", state.getVersion(false, false))
+        Out.Printf("%s\n", state.getVersion(false, false))
     }
 }
 
 
 func build(opts docopt.Opts) {
-    // build env vars:
-    // WARP_HOME (inherited)
-    // WARP_VERSION_HOME (inherited)
-    // WARP_VAULT_HOME
-    // WARP_KEYS_HOME   FIXME WARP_CONFIG_HOME
-    //                  FIXME WARP_LOCAL_HOME
-    // WARP_NAMESPACE
-    // WARP_VERSION
-    // WARP_ENV
-
     env, _ := opts.String("<env>")
 
     makefile, _ := opts.String("<Makefile>")
@@ -411,7 +355,7 @@ func build(opts docopt.Opts) {
     makeCommand.Stdout = os.Stdout
     makeCommand.Stderr = os.Stderr
 
-    err := makeCommand.Run()
+    err := runAndLog(makeCommand)
     if err != nil {
         panic(err)
     }
@@ -445,21 +389,12 @@ func importImage(opts docopt.Opts) {
         dockerVersion,
     )
 
-    fmt.Printf("Importing to %s\n", targetImageName)
+    Out.Printf("Importing %s to %s\n", sourceImageName, targetImageName)
 
-    cmds := NewCommandList()
-
-    // cmds.Docker("pull", sourceImageName)
-    cmds.Docker("buildx", "imagetools", "create", "-t", targetImageName, sourceImageName)
-
-    cmds.Run()
-
-    // if err := docker("tag", image, targetImage).Run(); err != nil {
-    //     panic(err)
-    // }
-    // if err := docker("push", targetImage).Run(); err != nil {
-    //     panic(err)
-    // }
+    cmd := docker("buildx", "imagetools", "create", "-t", targetImageName, sourceImageName)
+    if err := runAndLog(cmd); err != nil {
+        panic(err)
+    }
 }
 
 
@@ -475,16 +410,15 @@ func deploy(opts docopt.Opts) {
     if version, err := opts.String("<version>"); err == nil {
         deployVersion = version
     } else {
-        // serviceMeta := dockerHubClient.getServiceMeta()
-        // fmt.Printf("SERVICE META %s\n", serviceMeta)
         versionMeta := dockerHubClient.getVersionMeta(env, service)
-        // versionMeta, ok := serviceMeta.envVersionMetas[env][service]
-        // if !ok {
-        //     panic("Env service not found in repo.")
-        // }
         versions := versionMeta.versions
+        semverSortWithBuild(versions)
 
-        fmt.Printf("FOUND VERSIONS %s\n", versions)
+        versionStrs := []string{}
+        for _, version := range versions {
+            versionStrs = append(versionStrs, version.String())
+        }
+        Err.Printf("All versions: %s\n", strings.Join(versionStrs, ", "))
 
         filteredVersions := []*semver.Version{}
 
@@ -521,13 +455,16 @@ func deploy(opts docopt.Opts) {
             panic("No matching versions.")
         }
 
-        semverSortWithBuild(filteredVersions)
-        deployVersion = filteredVersions[len(filteredVersions) - 1].String()
+        filteredVersionStrs := []string{}
+        for _, version := range filteredVersions {
+            filteredVersionStrs = append(filteredVersionStrs, version.String())
+        }
+        Err.Printf("Filtered versions: %s\n", strings.Join(filteredVersionStrs, ", "))
 
-        fmt.Printf("FILTERED VERSIONS %s\n", filteredVersions)
+        deployVersion = filteredVersions[len(filteredVersions) - 1].String()
     }
 
-    fmt.Printf("Selected version %s\n", deployVersion)
+    Err.Printf("Selected version %s\n", deployVersion)
 
     blocks := getBlocks(env, service)
 
@@ -578,24 +515,17 @@ func deploy(opts docopt.Opts) {
             block,
         )
 
-        cmds := NewCommandList()
-        cmds.Dir = state.warpVersionHome
+        cmd := docker("buildx", "imagetools", "create", "-t", deployImageName, sourceImageName)
+        cmd.Dir = state.warpVersionHome
+        if err := runAndLog(cmd); err != nil {
+            panic(err)
+        }
 
-        // cmds.Docker("pull", sourceImageName)
-        // cmds.Docker("pull", deployImageName).IgnoreErrors()
-        // cmds.Docker("rmi", deployImageName).IgnoreErrors()
-        // fmt.Sprintf("%s-latest", block)
-        cmds.Docker("buildx", "imagetools", "create", "-t", deployImageName, sourceImageName)
-        // cmds.docker("tag", sourceImageName, deployImageName)
-        // cmds.docker("push", deployImageName)
-
-        cmds.Run()
-
-        fmt.Printf("Deployed %s -> %s\n", sourceImageName, deployImageName)
+        Err.Printf("Deployed %s -> %s\n", sourceImageName, deployImageName)
     }
 
     // the /status routes are only exposed via the load balancer internal routes
-
+    // it's not possible to reach the status routes via the external hostname
 
     // poll the load balancer for the specific blocks until the versions stabilize
     pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion)
@@ -614,27 +544,29 @@ func deployLocal(opts docopt.Opts) {
     deploy(opts)
 }
 
+
 func deployBeta(opts docopt.Opts) {
     opts["latest-beta"] = true
     deploy(opts)
 }
+
 
 func deployRelease(opts docopt.Opts) {
     opts["latest"] = true
     deploy(opts)
 }
 
+
 func lsVersion(opts docopt.Opts) {
     build, _ := opts.Bool("-b")
     docker, _ := opts.Bool("-d")
     state := getWarpState()
     version := state.getVersion(build, docker)
-    fmt.Printf("%s\n", version)
+    Out.Printf("%s\n", version)
 }
 
 
 func lsServices(opts docopt.Opts) {
-
     filterEnv, filterEnvErr := opts.String("<env>")
     includeEnv := func(env string) bool {
         return filterEnvErr != nil || filterEnv == env
@@ -690,7 +622,7 @@ func lsServices(opts docopt.Opts) {
                     )
                 }
 
-                fmt.Printf("%s-%s (%s)\n", env, service, versionsSummary)
+                Out.Printf("%s-%s (%s)\n", env, service, versionsSummary)
             }
         }
     }
@@ -728,7 +660,7 @@ func lsServiceBlocks(opts docopt.Opts) {
             if versionMeta, ok := serviceMeta.envVersionMetas[env][service]; ok {
                 for _, block := range serviceMeta.blocks {
                     if blockVersion, ok := versionMeta.latestBlocks[block]; ok {
-                        fmt.Printf("%s-%s %s %s\n", env, service, block, blockVersion.String())
+                        Out.Printf("%s-%s %s %s\n", env, service, block, blockVersion.String())
                     }
                 }
             }
@@ -800,7 +732,7 @@ func lsVersions(opts docopt.Opts) {
                     }
 
                     if baseVersion.PreRelease == "" {
-                        fmt.Printf(
+                        Out.Printf(
                             "%s-%s %d.%d.[%s]+%d\n",
                             env,
                             service,
@@ -810,7 +742,7 @@ func lsVersions(opts docopt.Opts) {
                             len(versions),
                         )
                     } else {
-                        fmt.Printf(
+                        Out.Printf(
                             "%s-%s %d.%d.[%s]-%s+%d\n",
                             env,
                             service,
@@ -828,8 +760,7 @@ func lsVersions(opts docopt.Opts) {
 }
 
 
-func lbListBlocks(opts docopt.Opts) {
-
+func lbLsBlocks(opts docopt.Opts) {
     env, _ := opts.String("<env>")
 
     blockInfos := getBlockInfos(env)
@@ -837,12 +768,12 @@ func lbListBlocks(opts docopt.Opts) {
     blocks := maps.Keys(blockInfos["lb"])
     sort.Strings(blocks)
     for _, block := range blocks {
-        fmt.Printf("%s\n", block)
+        Out.Printf("%s\n", block)
     }
 }
 
 
-func lbListHosts(opts docopt.Opts) {
+func lbLsHosts(opts docopt.Opts) {
     env, _ := opts.String("<env>")
 
     envAliases := []string{}
@@ -855,9 +786,9 @@ func lbListHosts(opts docopt.Opts) {
     services := maps.Keys(servicesConfig.Versions[0].Services)
     sort.Strings(services)
     for _, service := range services {
-        fmt.Printf("%s-%s.%s\n", env, service, servicesConfig.Domain)
+        Out.Printf("%s-%s.%s\n", env, service, servicesConfig.Domain)
         for _, envAlias := range envAliases {
-            fmt.Printf("%s-%s.%s\n", envAlias, service, servicesConfig.Domain)
+            Out.Printf("%s-%s.%s\n", envAlias, service, servicesConfig.Domain)
         }
     }
 }
@@ -894,7 +825,7 @@ func lbCreateConfig(opts docopt.Opts) {
 
     out := func(block string, config string) {
         if outDir == "" {
-            fmt.Println(templateString(`
+            Out.Println(templateString(`
             # block: {{.block}}
 
             {{.config}}
@@ -929,7 +860,6 @@ func lbCreateConfig(opts docopt.Opts) {
         if !includesBlock(block) {
             continue
         }
-
         out(block, config)
     }
 }
@@ -939,9 +869,7 @@ func serviceRun(opts docopt.Opts) {
     // note the options are usually generated by `serviceCreateUnit` which parses the service spec
 
     env, _ := opts.String("<env>")
-
     service, _ := opts.String("<service>")
-
     block, _ := opts.String("<block>")
 
     var portBlocks *PortBlocks
@@ -1066,9 +994,9 @@ func dockerNetworks(opts docopt.Opts) {
     hostNetworkCommands := getDockerNetworkCommands(env)
 
     for host, networkCommands := range hostNetworkCommands {
-        fmt.Printf("%s\n", host)
+        Out.Printf("%s\n", host)
         for _, networkCommand := range networkCommands {
-            fmt.Printf("    %s\n", strings.Join(networkCommand, " "))
+            Out.Printf("    %s\n", strings.Join(networkCommand, " "))
         }
     }
 }
@@ -1079,14 +1007,13 @@ func routingTables(opts docopt.Opts) {
 
     servicesConfig := getServicesConfig(env)
 
-
-    fmt.Printf("# /etc/iproute2/rt_tables\n")
+    Out.Printf("# /etc/iproute2/rt_tables\n")
     tableNumbers, err := expandAnyPorts(servicesConfig.Versions[0].RoutingTables)
     if err != nil {
         panic(err)
     }
     for _, tableNumber := range tableNumbers {
-        fmt.Printf("%d    warp%d\n", tableNumber, tableNumber)
+        Out.Printf("%d    warp%d\n", tableNumber, tableNumber)
     }
 }
 
@@ -1136,10 +1063,9 @@ func createUnits(opts docopt.Opts) {
     )
     hostsServicesUnits := systemdUnits.Generate()
 
-
     out := func(host string, service string, block string, units *Units) {
         if outDir == "" {
-            fmt.Println(templateString(`
+            Out.Println(templateString(`
             # host: {{.host}}
             # service: {{.service}}
             # block: {{.block}}
@@ -1171,7 +1097,6 @@ func createUnits(opts docopt.Opts) {
         // FIXME drain unit
     }
 
-
     includesService := func(service string)(bool) {
         if len(includeServices) == 0 {
             return true
@@ -1199,10 +1124,4 @@ func createUnits(opts docopt.Opts) {
             }
         }
     }
-
 }
-
-
-
-
-

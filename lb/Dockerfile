@@ -1,6 +1,7 @@
 FROM ubuntu:22.04
 # see https://docs.docker.com/develop/develop-images/dockerfile_best-practices/
 
+ARG TARGETPLATFORM
 ARG warp_env
 ENV WARP_ENV=$warp_env
 

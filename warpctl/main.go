@@ -14,8 +14,11 @@ import (
     // "syscall"
     // "os/signal"
     "errors"
+    "regexp"
+    "log"
 
     "golang.org/x/exp/maps"
+    "golang.org/x/exp/slices"
 
     "github.com/docopt/docopt-go"
     "github.com/coreos/go-semver/semver"
@@ -24,63 +27,16 @@ import (
 
 const WARP_VERSION = "0.0.1"
 
+var Out *log.Logger
+var Err *log.Logger
 
-// type CtlArgs struct {
-//   InitDockerHubToken string `docopt:"--dockerhub_token"`
-//   InitVaultHome string `docopt:"--vault_home"`
-//   InitKeysHome int `docopt:"--keys_home"`
-//   VersionNext string `docopt:"-next"`
-//   VersionBeta string `docopt:"-beta"`
-//   VersionRelease int `docopt:"-release"`
-//   DeployPercent string `docopt:"--percent"`
-//   CreateOutDir string `docopt:"--outdir"`
-// }
+func init() {
+    Out = log.New(os.Stdout, "", log.Ldate | log.Ltime | log.Lshortfile)
+    Err = log.New(os.Stderr, "", log.Ldate | log.Ltime | log.Lshortfile)
+}
 
 
-// the vault is updated outside of warp using for example ansible
-// the keys is updated with an updater service that writes new key versions into the key home
-// fixme have a "latest" file that points to the latest keys version
-
-// 1.2.3-beta+33234234
-
-
-// WARP_HOME=/srv/warp
-// WARP_VERSION_HOME
-
-// warpctl lb run <env> <interface_name>
-//  warpctl lb create-unit <env> <interface_name> [--target_warp_home=<target_warp_home>]
-//  warpctl key-updater run <env>
-//  warpctl key-updater create-unit <env>
-
-
-// README
-// docker containers run with /srv/warp/vault mounted read-only to the vault
-// /srv/warp/keys mounted read-only to the keys
-
-// lb does not have keys mounted
-
-// the keys-updater service has /srv/warp/keys mounted read+write
-// the keys-updater unit has no restart on exit
-
-// all other units require keys-updater first
-// lb requires all other units first
-
-
-// build populates WARP_VAULT_HOME, WARP_KEYS_HOME, WARP_ENV and WARP_NAMESPACE
-
-
-
-// all warp services should have a /status path with json: version, keys version, uptime
-
-
-
-
-// FIXME dns sync [--down_hosts=<hosts>]
-
-
-
-
-// needs a docker hub user access token
+// TODO dns tools
 func main() {
     usage := `Warp control. Fluid iteration and zero downtime continuous release.
 
@@ -94,7 +50,7 @@ Usage:
         [--site_home=<site_home>]
     warpctl stage version (local | sync | next (beta | release) --message=<message>)
     warpctl build <env> <Makefile>
-    warpctl import <env> <repo>
+    warpctl import <env> <image> [--service_name=<service_name>]
     warpctl deploy <env> <service>
         (latest-local | latest-beta | latest | <version>)
         (<blocklist> | --percent=<percent>)
@@ -102,19 +58,21 @@ Usage:
     warpctl deploy-beta <env> <service> [--percent=<percent>]
     warpctl deploy-release <env> <service> [--percent=<percent>]
     warpctl watch <env> <service>
-        [--target_version=<target_version>]
+        (latest-local | latest-beta | latest | <version>)
         (<blocklist> | --percent=<percent>)
     warpctl ls version [-b] [-d]
     warpctl ls services [<env>]
     warpctl ls service-blocks [<env> [<service>]]
     warpctl ls versions [<env> [<service>]]
-    warpctl lb list-blocks <env>
-    warpctl lb list-hosts <env>
+    warpctl lb blocks <env>
+    warpctl lb hosts <env>
+        [--envalias=<envalias>]
     warpctl lb create-config <env> [<block>]
         [--envalias=<envalias>]
         [--out=<outdir>]
     warpctl run-local <Makefile> [--envalias=<envalias>]
-    warpctl service ls docker-network <env>
+    warpctl service docker-networks <env>
+    warpctl service routing-tables <env>
     warpctl service run <env> <service> <block>
         [--rttable=<rttable> --dockernet=<dockernet>]
         [--portblocks=<portblocks>]
@@ -125,12 +83,13 @@ Usage:
         [--status=<status_mode>]
         [--status-prefix=<status_prefix>]
         --domain=<domain>
+        [--envvar=<envvar>...]
     warpctl service drain <env> <service> <block>
         [--portblocks=<portblocks>]
-    warpctl service create-units <env> [<service>] [<block>]]
-        [--out=<outdir>]
+    warpctl service create-units <env> [<service> [<block>]]
         [--target_warp_home=<target_warp_home>]
         [--target_warpctl=<target_warpctl>]
+        [--out=<outdir>]
     warpctl service [down | up] <env> [<service> [<block>]]
 
 Options:
@@ -171,6 +130,8 @@ Options:
         }
     } else if build_, _ := opts.Bool("build"); build_ {
         build(opts)
+    } else if import_, _ := opts.Bool("import"); import_ {
+        importImage(opts)
     } else if deploy_, _ := opts.Bool("deploy"); deploy_ {
         deploy(opts)
     } else if deployLocal_, _ := opts.Bool("deploy-local"); deployLocal_ {
@@ -190,16 +151,20 @@ Options:
             lsVersions(opts)
         }
     } else if lb, _ := opts.Bool("lb"); lb {
-        if listBlocks, _ := opts.Bool("list-blocks"); listBlocks {
-            lbListBlocks(opts)
-        } else if listHosts, _ := opts.Bool("list-hosts"); listHosts {
-            lbListHosts(opts)
+        if blocks, _ := opts.Bool("blocks"); blocks {
+            lbLsBlocks(opts)
+        } else if hosts, _ := opts.Bool("hosts"); hosts {
+            lbLsHosts(opts)
         } else if createConfig, _ := opts.Bool("create-config"); createConfig {
             lbCreateConfig(opts)
         }
     } else if service, _ := opts.Bool("service"); service {
         if run, _ := opts.Bool("run"); run {
             serviceRun(opts)
+        } else if dockerNetworks_, _ := opts.Bool("docker-networks"); dockerNetworks_ {
+            dockerNetworks(opts)
+        } else if routingTables_, _ := opts.Bool("routing-tables"); routingTables_ {
+            routingTables(opts)
         } else if createUnits_, _ := opts.Bool("create-units"); createUnits_ {
             createUnits(opts)
         }
@@ -265,7 +230,7 @@ func stageVersion(opts docopt.Opts) {
         state.versionSettings.StagedVersion = &version
         setWarpState(state)
 
-        fmt.Printf("%s (local)\n", getVersion(false, false))
+        Out.Printf("%s (local)\n", state.getVersion(false, false))
     } else {
         sync, _ := opts.Bool("sync")
         next, _ := opts.Bool("next")
@@ -275,14 +240,14 @@ func stageVersion(opts docopt.Opts) {
 
             gitStashCommand := exec.Command("git", "stash", "-u")
             gitStashCommand.Dir = state.warpVersionHome
-            err = gitStashCommand.Run()
+            err = runAndLog(gitStashCommand)
             if err != nil {
                 panic(err)
             }
 
             gitPullCommand := exec.Command("git", "pull")
             gitPullCommand.Dir = state.warpVersionHome
-            err = gitPullCommand.Run()
+            err = runAndLog(gitPullCommand)
             if err != nil {
                 panic(err)
             }
@@ -327,7 +292,7 @@ func stageVersion(opts docopt.Opts) {
 
             gitAddCommand := exec.Command("git", "add", "version.json")
             gitAddCommand.Dir = state.warpVersionHome
-            err = gitAddCommand.Run()
+            err = runAndLog(gitAddCommand)
             if err != nil {
                 panic(err)
             }
@@ -335,34 +300,26 @@ func stageVersion(opts docopt.Opts) {
             message, _ := opts.String("--message")
             gitCommitCommand := exec.Command("git", "commit", "-m", message)
             gitCommitCommand.Dir = state.warpVersionHome
-            err = gitCommitCommand.Run()
+            err = runAndLog(gitCommitCommand)
             if err != nil {
                 panic(err)
             }
 
             gitPushCommand := exec.Command("git", "push")
             gitPushCommand.Dir = state.warpVersionHome
-            err = gitPushCommand.Run()
+            err = runAndLog(gitPushCommand)
             if err != nil {
                 panic(err)
             }
         }
 
-        fmt.Printf("%s\n", getVersion(false, false))
+        Out.Printf("%s\n", state.getVersion(false, false))
     }
 }
 
 
 func build(opts docopt.Opts) {
-    // build env vars:
-    // WARP_HOME (inherited)
-    // WARP_VERSION_HOME (inherited)
-    // WARP_VAULT_HOME
-    // WARP_KEYS_HOME   FIXME WARP_CONFIG_HOME
-    //                  FIXME WARP_LOCAL_HOME
-    // WARP_NAMESPACE
-    // WARP_VERSION
-    // WARP_ENV
+    env, _ := opts.String("<env>")
 
     makefile, _ := opts.String("<Makefile>")
     makefileName := path.Base(makefile)
@@ -375,10 +332,7 @@ func build(opts docopt.Opts) {
     }
 
     state := getWarpState()
-
-    env, _ := opts.String("<env>")
-
-    version := getVersion(true, true)
+    version := state.getVersion(true, true)
 
     envVars := map[string]string{
         "WARP_VAULT_HOME": state.warpSettings.RequireVaultHome(),
@@ -401,12 +355,46 @@ func build(opts docopt.Opts) {
     makeCommand.Stdout = os.Stdout
     makeCommand.Stderr = os.Stderr
 
-    err := makeCommand.Run()
+    err := runAndLog(makeCommand)
     if err != nil {
         panic(err)
     }
 
     announceBuild(env, service, version)
+}
+
+
+func importImage(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
+    sourceImageName, _ := opts.String("<image>")
+
+    var serviceName string
+    if name, err := opts.String("--service_name"); err == nil {
+        serviceName = name
+    } else {
+        serviceNameRegex := regexp.MustCompile("^(.*)/([^:]+):(.*)$")
+        if groups := serviceNameRegex.FindStringSubmatch(sourceImageName); groups != nil {
+            serviceName = groups[2]
+        }
+    }
+
+    state := getWarpState()
+    dockerVersion := state.getVersion(true, true)
+
+    targetImageName := fmt.Sprintf(
+        "%s/%s-%s:%s",
+        state.warpSettings.RequireDockerNamespace(),
+        env,
+        serviceName,
+        dockerVersion,
+    )
+
+    Out.Printf("Importing %s to %s\n", sourceImageName, targetImageName)
+
+    cmd := docker("buildx", "imagetools", "create", "-t", targetImageName, sourceImageName)
+    if err := runAndLog(cmd); err != nil {
+        panic(err)
+    }
 }
 
 
@@ -422,15 +410,15 @@ func deploy(opts docopt.Opts) {
     if version, err := opts.String("<version>"); err == nil {
         deployVersion = version
     } else {
-        serviceMeta := dockerHubClient.getServiceMeta()
-        fmt.Printf("SERVICE META %s\n", serviceMeta)
-        versionMeta, ok := serviceMeta.envVersionMetas[env][service]
-        if !ok {
-            panic("Env service not found in repo.")
-        }
+        versionMeta := dockerHubClient.getVersionMeta(env, service)
         versions := versionMeta.versions
+        semverSortWithBuild(versions)
 
-        fmt.Printf("FOUND VERSIONS %s\n", versions)
+        versionStrs := []string{}
+        for _, version := range versions {
+            versionStrs = append(versionStrs, version.String())
+        }
+        Err.Printf("All versions: %s\n", strings.Join(versionStrs, ", "))
 
         filteredVersions := []*semver.Version{}
 
@@ -467,13 +455,16 @@ func deploy(opts docopt.Opts) {
             panic("No matching versions.")
         }
 
-        semverSortWithBuild(filteredVersions)
-        deployVersion = filteredVersions[len(filteredVersions) - 1].String()
+        filteredVersionStrs := []string{}
+        for _, version := range filteredVersions {
+            filteredVersionStrs = append(filteredVersionStrs, version.String())
+        }
+        Err.Printf("Filtered versions: %s\n", strings.Join(filteredVersionStrs, ", "))
 
-        fmt.Printf("FILTERED VERSIONS %s\n", filteredVersions)
+        deployVersion = filteredVersions[len(filteredVersions) - 1].String()
     }
 
-    fmt.Printf("Selected version %s\n", deployVersion)
+    Err.Printf("Selected version %s\n", deployVersion)
 
     blocks := getBlocks(env, service)
 
@@ -524,23 +515,17 @@ func deploy(opts docopt.Opts) {
             block,
         )
 
-        cmds := NewCommandList()
-        cmds.Dir = state.warpVersionHome
+        cmd := docker("buildx", "imagetools", "create", "-t", deployImageName, sourceImageName)
+        cmd.Dir = state.warpVersionHome
+        if err := runAndLog(cmd); err != nil {
+            panic(err)
+        }
 
-        cmds.Docker("pull", sourceImageName)
-        cmds.Docker("pull", deployImageName).IgnoreErrors()
-        cmds.Docker("rmi", deployImageName).IgnoreErrors()
-        // fmt.Sprintf("%s-latest", block)
-        cmds.Docker("buildx", "imagetools", "create", "-t", deployImageName, sourceImageName)
-        // cmds.docker("tag", sourceImageName, deployImageName)
-        // cmds.docker("push", deployImageName)
-
-        cmds.Run()
-
-        fmt.Printf("Deployed %s -> %s\n", sourceImageName, deployImageName)
+        Err.Printf("Deployed %s -> %s\n", sourceImageName, deployImageName)
     }
 
     // the /status routes are only exposed via the load balancer internal routes
+    // it's not possible to reach the status routes via the external hostname
 
     // poll the load balancer for the specific blocks until the versions stabilize
     pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion)
@@ -559,26 +544,29 @@ func deployLocal(opts docopt.Opts) {
     deploy(opts)
 }
 
+
 func deployBeta(opts docopt.Opts) {
     opts["latest-beta"] = true
     deploy(opts)
 }
+
 
 func deployRelease(opts docopt.Opts) {
     opts["latest"] = true
     deploy(opts)
 }
 
+
 func lsVersion(opts docopt.Opts) {
     build, _ := opts.Bool("-b")
     docker, _ := opts.Bool("-d")
-    version := getVersion(build, docker)
-    fmt.Printf("%s\n", version)
+    state := getWarpState()
+    version := state.getVersion(build, docker)
+    Out.Printf("%s\n", version)
 }
 
 
 func lsServices(opts docopt.Opts) {
-
     filterEnv, filterEnvErr := opts.String("<env>")
     includeEnv := func(env string) bool {
         return filterEnvErr != nil || filterEnv == env
@@ -634,7 +622,7 @@ func lsServices(opts docopt.Opts) {
                     )
                 }
 
-                fmt.Printf("%s-%s (%s)\n", env, service, versionsSummary)
+                Out.Printf("%s-%s (%s)\n", env, service, versionsSummary)
             }
         }
     }
@@ -672,7 +660,7 @@ func lsServiceBlocks(opts docopt.Opts) {
             if versionMeta, ok := serviceMeta.envVersionMetas[env][service]; ok {
                 for _, block := range serviceMeta.blocks {
                     if blockVersion, ok := versionMeta.latestBlocks[block]; ok {
-                        fmt.Printf("%s-%s %s %s\n", env, service, block, blockVersion.String())
+                        Out.Printf("%s-%s %s %s\n", env, service, block, blockVersion.String())
                     }
                 }
             }
@@ -744,7 +732,7 @@ func lsVersions(opts docopt.Opts) {
                     }
 
                     if baseVersion.PreRelease == "" {
-                        fmt.Printf(
+                        Out.Printf(
                             "%s-%s %d.%d.[%s]+%d\n",
                             env,
                             service,
@@ -754,7 +742,7 @@ func lsVersions(opts docopt.Opts) {
                             len(versions),
                         )
                     } else {
-                        fmt.Printf(
+                        Out.Printf(
                             "%s-%s %d.%d.[%s]-%s+%d\n",
                             env,
                             service,
@@ -772,75 +760,61 @@ func lsVersions(opts docopt.Opts) {
 }
 
 
-func lbListBlocks(opts docopt.Opts) {
-
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
-    }
+func lbLsBlocks(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
 
     blockInfos := getBlockInfos(env)
 
-    lbBlockInfos := blockInfos["lb"]
-    blocks := maps.Keys(lbBlockInfos)
+    blocks := maps.Keys(blockInfos["lb"])
     sort.Strings(blocks)
     for _, block := range blocks {
-        fmt.Printf("%s\n", block)
+        Out.Printf("%s\n", block)
     }
 }
 
 
-func lbListHosts(opts docopt.Opts) {
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
-    }
-
-    blockInfos := getBlockInfos(env)
-
-    hosts := []string{}
-    for _, blockInfo := range blockInfos["lb"] {
-        hosts = append(hosts, blockInfo.host)
-    }
-    sort.Strings(hosts)
-    for _, host := range hosts {
-        fmt.Printf("%s\n", host)
-    }
-}
-
-
-func lbCreateConfig(opts docopt.Opts) {
-    // FIXME read the site meta data
-    fmt.Printf("nginx config\n")
-
-    // FIXME
-    // FIXME lb.go
-    // nginxConfig := NewNginxConfig(env)
-    // blockConfigs := nginxConfig.generate()
-
-    // if one block, print the config for that block without a header
-    // if more than one block, add a header before each block
-
-
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
-    }
+func lbLsHosts(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
 
     envAliases := []string{}
     if envAlias, err := opts.String("--envalias"); err == nil {
         envAliases = append(envAliases, envAlias)
     }
 
-    includeBlocks := []string{}
-    if block, err := opts.String("<block>"); err == nil {
-        includeBlocks = append(includeBlocks, block)
+    servicesConfig := getServicesConfig(env)
+
+    services := maps.Keys(servicesConfig.Versions[0].Services)
+    sort.Strings(services)
+    for _, service := range services {
+        Out.Printf("%s-%s.%s\n", env, service, servicesConfig.Domain)
+        for _, envAlias := range envAliases {
+            Out.Printf("%s-%s.%s\n", envAlias, service, servicesConfig.Domain)
+        }
+    }
+}
+
+
+func lbCreateConfig(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
+
+    envAliases := []string{}
+    if envAlias, err := opts.String("--envalias"); err == nil {
+        envAliases = append(envAliases, envAlias)
     }
 
+    var includeBlocks []string
+    if block, err := opts.String("<block>"); err == nil {
+        includeBlocks = append(includeBlocks, block)
+    } else {
+        includeBlocks = []string{}
+    }
 
-
-
-
+    var outDir string
+    if path, err := opts.String("--out"); err == nil {
+        outDir = path
+    } else {
+        outDir = ""
+    }
 
     nginxConfig, err := NewNginxConfig(env, envAliases)
     if err != nil {
@@ -848,36 +822,45 @@ func lbCreateConfig(opts docopt.Opts) {
     }
     blockConfigs := nginxConfig.Generate()
 
-    outParts := []string{}
 
-    if len(includeBlocks) == 0 {
-        for block, config := range blockConfigs {
-            outParts = append(outParts, fmt.Sprintf("#\n# %s\n#\n\n%s", block, config))
-        }
-    } else if len(includeBlocks) == 1 {
-        block := includeBlocks[0]
-        config, ok := blockConfigs[block]
-        if !ok {
-            panic(fmt.Sprintf("Block \"%s\" not found", block))
-        }
-        outParts = append(outParts, config)
-    } else {
-        for _, block := range includeBlocks {
-            config, ok := blockConfigs[block]
-            if !ok {
-                panic(fmt.Sprintf("Block \"%s\" not found", block))
+    out := func(block string, config string) {
+        if outDir == "" {
+            Out.Println(templateString(`
+            # block: {{.block}}
+
+            {{.config}}
+
+            `, map[string]any {
+                "block": block,
+                "config": config,
+            }))
+        } else {
+            // write to file
+            // <dir>/<block>.conf
+            unitFileName := fmt.Sprintf("%s.conf", block)
+            err := os.WriteFile(
+                path.Join(outDir, unitFileName),
+                []byte(config),
+                0644,
+            )
+            if err != nil {
+                panic(err)
             }
-            outParts = append(outParts, fmt.Sprintf("#\n# %s\n#\n\n", block))
-            outParts = append(outParts, config)
         }
     }
 
-    outStr := strings.Join(outParts, "\n")
+    includesBlock := func(block string)(bool) {
+        if len(includeBlocks) == 0 {
+            return true
+        }
+        return slices.Contains(includeBlocks, block)
+    }
 
-    if outPath, err := opts.String("--out"); err == nil {
-        os.WriteFile(outPath, []byte(outStr), 0644)
-    } else {
-        fmt.Printf("%s", outStr)
+    for block, config := range blockConfigs {
+        if !includesBlock(block) {
+            continue
+        }
+        out(block, config)
     }
 }
 
@@ -886,9 +869,7 @@ func serviceRun(opts docopt.Opts) {
     // note the options are usually generated by `serviceCreateUnit` which parses the service spec
 
     env, _ := opts.String("<env>")
-
     service, _ := opts.String("<service>")
-
     block, _ := opts.String("<block>")
 
     var portBlocks *PortBlocks
@@ -902,11 +883,7 @@ func serviceRun(opts docopt.Opts) {
     var routingTable *RoutingTable
     var dockerNetwork *DockerNetwork
 
-    if _, ok := opts["--rttable"]; ok {
-        routingTableStr, err := opts.String("--rttable")
-        if err != nil {
-            panic(err)
-        }
+    if routingTableStr, err := opts.String("--rttable"); err == nil {
         routingTable = parseRoutingTable(routingTableStr)
 
         dockerNetStr, err := opts.String("--dockernet")
@@ -971,6 +948,19 @@ func serviceRun(opts docopt.Opts) {
     var statusPrefix string
     if prefix, err := opts.String("--status-prefix"); err == nil {
         statusPrefix = prefix
+    } else {
+        statusPrefix = ""
+    }
+
+    envVars := map[string]string{}
+    if pairs, ok := opts["--envvar"]; ok {
+        for _, pair := range pairs.([]string) {
+            parts := strings.SplitN(pair, ":", 2)
+            if 2 != len(parts) {
+                panic(fmt.Sprintf("Invalid envvar format. Must be key:value. (%s)", pair))
+            }
+            envVars[parts[0]] = parts[1]
+        }
     }
 
     state := getWarpState()
@@ -992,38 +982,146 @@ func serviceRun(opts docopt.Opts) {
         siteMountMode: siteMountMode,
         statusMode: statusMode,
         statusPrefix: statusPrefix,
+        envVars: envVars,
     }
     runWorker.Run()
 }
 
 
-// FIXME create units called <service>-cleanup that run once and run when bringing services down to cleanup running dockers on that portlist
-// FIXME run should set common env vars
-// WARP_HOME
-func createUnits(opts docopt.Opts) {
+func dockerNetworks(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
 
-    env, err := opts.String("<env>")
-    if err != nil {
-        panic(err)
-    }
+    hostNetworkCommands := getDockerNetworkCommands(env)
 
-    // FIXME target warp home
-    
-    systemdUnits := NewSystemdUnits(env, "/srv/warp", "/usr/local/bin/warpctl")
-    hostsServicesUnits := systemdUnits.Generate()
-
-    for host, servicesUnits := range hostsServicesUnits {
-        fmt.Printf("#\n# %s\n#\n\n", host)
-        for service, serviceUnits := range servicesUnits {
-            for block, unit := range serviceUnits {
-                fmt.Printf("#\n# %s-%s block %s\n#\n\n%s\n\n", env, service, block, unit)
-            }
+    for host, networkCommands := range hostNetworkCommands {
+        Out.Printf("%s\n", host)
+        for _, networkCommand := range networkCommands {
+            Out.Printf("    %s\n", strings.Join(networkCommand, " "))
         }
     }
-
 }
 
 
+func routingTables(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
+
+    servicesConfig := getServicesConfig(env)
+
+    Out.Printf("# /etc/iproute2/rt_tables\n")
+    tableNumbers, err := expandAnyPorts(servicesConfig.Versions[0].RoutingTables)
+    if err != nil {
+        panic(err)
+    }
+    for _, tableNumber := range tableNumbers {
+        Out.Printf("%d    warp%d\n", tableNumber, tableNumber)
+    }
+}
 
 
+func createUnits(opts docopt.Opts) {
+    env, _ := opts.String("<env>")
 
+    var includeServices []string
+    if service, err := opts.String("<service>"); err == nil {
+        includeServices = []string{service}
+    } else {
+        includeServices = []string{}
+    }
+
+    var includeBlocks []string
+    if block, err := opts.String("<block>"); err == nil {
+        includeBlocks = []string{block}
+    } else {
+        includeBlocks = []string{}
+    }
+
+    var targetWarpHome string
+    if path, err := opts.String("--target_warp_home"); err == nil {
+        targetWarpHome = path
+    } else {
+        targetWarpHome = fmt.Sprintf("/srv/warp/%s", env)
+    }
+
+    var targetWarpctl string
+    if path, err := opts.String("--target_warpctl"); err == nil {
+        targetWarpctl = path
+    } else {
+        targetWarpctl = "/usr/local/bin/warpctl"
+    }
+
+    var outDir string
+    if path, err := opts.String("--out"); err == nil {
+        outDir = path
+    } else {
+        outDir = ""
+    }
+
+    systemdUnits := NewSystemdUnits(
+        env,
+        targetWarpHome,
+        targetWarpctl,
+    )
+    hostsServicesUnits := systemdUnits.Generate()
+
+    out := func(host string, service string, block string, units *Units) {
+        if outDir == "" {
+            Out.Println(templateString(`
+            # host: {{.host}}
+            # service: {{.service}}
+            # block: {{.block}}
+
+            {{.unit}}
+
+            `, map[string]any {
+                "host": host,
+                "service": service,
+                "block": block,
+                "unit": units.serviceUnit,
+            }))
+        } else {
+            // write to file
+            // <dir>/<host>/warp-<env>-<service>-<shortBlock>.service
+            hostDir := path.Join(outDir, host)
+            os.MkdirAll(hostDir, 0755)
+            unitFileName := fmt.Sprintf("warp-%s-%s-%s.service", env, service, units.shortBlock)
+            err := os.WriteFile(
+                path.Join(hostDir, unitFileName),
+                []byte(units.serviceUnit),
+                0644,
+            )
+            if err != nil {
+                panic(err)
+            }
+        }
+
+        // FIXME drain unit
+    }
+
+    includesService := func(service string)(bool) {
+        if len(includeServices) == 0 {
+            return true
+        }
+        return slices.Contains(includeServices, service)
+    }
+
+    includesBlock := func(block string)(bool) {
+        if len(includeBlocks) == 0 {
+            return true
+        }
+        return slices.Contains(includeBlocks, block)
+    }
+
+    for host, servicesUnits := range hostsServicesUnits {
+        for service, serviceUnits := range servicesUnits {
+            if !includesService(service) {
+                continue
+            }
+            for block, units := range serviceUnits {
+                if !includesBlock(block) {
+                    continue
+                }
+                out(host, service, block, units)
+            }
+        }
+    }
+}

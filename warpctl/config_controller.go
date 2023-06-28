@@ -1379,6 +1379,7 @@ func (self *SystemdUnits) Generate() map[string]map[string]map[string]*Units {
 type Units struct {
     serviceUnit string
     drainUnit string
+    shortBlock string
 }
 
 // FIXME
@@ -1460,8 +1461,9 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
         parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
 
         lbUnits[block] = &Units{
-            serviceUnit: self.serviceUnit("lb", block, parts),
+            serviceUnit: self.serviceUnit("lb", block, blockInfo.interfaceName, parts),
             drainUnit: self.drainUnit("lb", block, parts),
+            shortBlock: blockInfo.interfaceName,
         }
     }
     servicesUnits["lb"] = lbUnits
@@ -1499,8 +1501,9 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
         parts = append(parts, fmt.Sprintf("--domain=%s", self.servicesConfig.Domain))
 
         configUpdaterUnits[block] = &Units{
-            serviceUnit: self.serviceUnit("config-updater", block, parts),
+            serviceUnit: self.serviceUnit("config-updater", block, block, parts),
             drainUnit: self.drainUnit("config-updater", block, parts),
+            shortBlock: block,
         }
     }
     servicesUnits["config-updater"] = configUpdaterUnits
@@ -1586,8 +1589,9 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
             }
 
             serviceUnits[block] = &Units{
-                serviceUnit: self.serviceUnit(service, block, parts),
+                serviceUnit: self.serviceUnit(service, block, block, parts),
                 drainUnit: self.drainUnit(service, block, parts),
+                shortBlock: block,
             }
         }
         servicesUnits[service] = serviceUnits
@@ -1597,7 +1601,7 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
 }
 
 
-func (self *SystemdUnits) serviceUnit(service string, block string, cmdArgs []string) string {
+func (self *SystemdUnits) serviceUnit(service string, block string, shortBlock string, cmdArgs []string) string {
     unit := templateString(`
     [Unit]
     Description=Warpctl {{.env}} {{.service}} {{.block}}
@@ -1614,8 +1618,8 @@ func (self *SystemdUnits) serviceUnit(service string, block string, cmdArgs []st
     ExecStop=/bin/kill -s TERM $MAINPID
     TimeoutStopSec=60
     Restart=always
-    StandardOutput=file:/var/log/warp/{{.env}}-{{.service}}-{{.block}}.out
-    StandardError=file:/var/log/warp/{{.env}}-{{.service}}-{{.block}}.err
+    StandardOutput=file:/var/log/warp/{{.env}}-{{.service}}-{{.shortBlock}}.out
+    StandardError=file:/var/log/warp/{{.env}}-{{.service}}-{{.shortBlock}}.err
 
     [Install]
     WantedBy=multi-user.target
@@ -1623,6 +1627,7 @@ func (self *SystemdUnits) serviceUnit(service string, block string, cmdArgs []st
         "env": self.env,
         "service": service,
         "block": block,
+        "shortBlock": shortBlock,
         "warpHome": self.targetWarpHome,
         "cmd": strings.Join(cmdArgs, " "),
     })
@@ -1678,5 +1683,7 @@ func getDockerNetworkCommands(env string) map[string][][]string {
 
     return hostNetworkCommands
 }
+
+
 
 

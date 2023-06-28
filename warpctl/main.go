@@ -110,8 +110,8 @@ Usage:
     warpctl ls services [<env>]
     warpctl ls service-blocks [<env> [<service>]]
     warpctl ls versions [<env> [<service>]]
-    warpctl lb list-blocks <env>
-    warpctl lb list-hosts <env>
+    warpctl lb blocks <env>
+    warpctl lb hosts <env>
         [--envalias=<envalias>]
     warpctl lb create-config <env> [<block>]
         [--envalias=<envalias>]
@@ -197,9 +197,9 @@ Options:
             lsVersions(opts)
         }
     } else if lb, _ := opts.Bool("lb"); lb {
-        if listBlocks, _ := opts.Bool("list-blocks"); listBlocks {
+        if listBlocks, _ := opts.Bool("blocks"); listBlocks {
             lbListBlocks(opts)
-        } else if listHosts, _ := opts.Bool("list-hosts"); listHosts {
+        } else if listHosts, _ := opts.Bool("hosts"); listHosts {
             lbListHosts(opts)
         } else if createConfig, _ := opts.Bool("create-config"); createConfig {
             lbCreateConfig(opts)
@@ -1137,7 +1137,7 @@ func createUnits(opts docopt.Opts) {
     hostsServicesUnits := systemdUnits.Generate()
 
 
-    out := func(host string, service string, block string, unit string) {
+    out := func(host string, service string, block string, units *Units) {
         if outDir == "" {
             fmt.Println(templateString(`
             # host: {{.host}}
@@ -1150,23 +1150,25 @@ func createUnits(opts docopt.Opts) {
                 "host": host,
                 "service": service,
                 "block": block,
-                "unit": unit,
+                "unit": units.serviceUnit,
             }))
         } else {
             // write to file
-            // <dir>/<host>/warp-<env>-<service>-<block>.service
+            // <dir>/<host>/warp-<env>-<service>-<shortBlock>.service
             hostDir := path.Join(outDir, host)
             os.MkdirAll(hostDir, 0755)
-            unitFileName := fmt.Sprintf("warp-%s-%s-%s.service", env, service, block)
+            unitFileName := fmt.Sprintf("warp-%s-%s-%s.service", env, service, units.shortBlock)
             err := os.WriteFile(
                 path.Join(hostDir, unitFileName),
-                []byte(unit),
+                []byte(units.serviceUnit),
                 0644,
             )
             if err != nil {
                 panic(err)
             }
         }
+
+        // FIXME drain unit
     }
 
 
@@ -1193,9 +1195,7 @@ func createUnits(opts docopt.Opts) {
                 if !includesBlock(block) {
                     continue
                 }
-
-                out(host, service, block, units.serviceUnit)
-                // FIXME drain unit
+                out(host, service, block, units)
             }
         }
     }

@@ -261,5 +261,13 @@ sudo scutil --set ComputerName <YOURHOSTNAME>
 ```
 
 
+## Router setup guides
+
+Do not connect the LB interfaces directly to the WAN without setting a firewall policy to expose only the LB external ports. It's best to use a high packet-per-second router in front of the LB interfaces to apply traffic shaping, standard firewall rules, and only expose the LB external ports.
+
+- [EdgeRouter basic setup guide](router-setup/edgerouter.md)
+
+
+
 ![Warp Control](res/images/warpr.webp "Warp Control")
 

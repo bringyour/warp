@@ -1232,18 +1232,20 @@ func (self *NginxConfig) addServiceBlocks() {
                         }
                     }
 
-                    self.block("if ($request_method = 'OPTIONS')", func() {
-                        // nginx inheritance model does not inheret `add_header` into a block where another `add_header` is defined
-                        // add all the headers inside a block where another `add_header` is defined
-                        addSecurityHeaders()
-                        addCorsHeaders()
-                        self.raw(`
-                        add_header 'Access-Control-Max-Age' 1728000;
-                        add_header 'Content-Type' 'text/plain; charset=utf-8';
-                        add_header 'Content-Length' 0;
-                        return 204;
-                        `)
-                    })
+                    if 0 < len(serviceConfig.CorsOrigins) {
+                        self.block("if ($request_method = 'OPTIONS')", func() {
+                            // nginx inheritance model does not inheret `add_header` into a block where another `add_header` is defined
+                            // add all the headers inside a block where another `add_header` is defined
+                            addSecurityHeaders()
+                            addCorsHeaders()
+                            self.raw(`
+                            add_header 'Access-Control-Max-Age' 1728000;
+                            add_header 'Content-Type' 'text/plain; charset=utf-8';
+                            add_header 'Content-Length' 0;
+                            return 204;
+                            `)
+                        })
+                    }
                     addSecurityHeaders()
                     addCorsHeaders()
                 })

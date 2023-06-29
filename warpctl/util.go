@@ -350,12 +350,11 @@ func (self *Event) WaitForSet(timeout time.Duration) bool {
 }
 
 func (self *Event) SetOnSignals(signalValues ...syscall.Signal) func() {
-    stopSignal := make(chan os.Signal, 2)
+    stopSignal := make(chan os.Signal, len(signalValues))
     for _, signalValue := range signalValues {
         signal.Notify(stopSignal, signalValue)
     }
     go func() {
-        signalWatcher:
         for {
             select {
             case sig, ok := <- stopSignal:
@@ -363,7 +362,7 @@ func (self *Event) SetOnSignals(signalValues ...syscall.Signal) func() {
                     Err.Printf("Stop signal detected (%d).\n", sig)
                     self.Set()
                 } else {
-                    break signalWatcher
+                    return
                 }
             }
         }

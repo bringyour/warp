@@ -97,7 +97,9 @@ func (self *RunWorker) Run() {
             if self.deployedVersion != nil && *self.deployedVersion == *latestVersion {
                 return false
             }
-            if self.configMountMode == MOUNT_MODE_NO {
+            switch self.configMountMode {
+            case MOUNT_MODE_NO, MOUNT_MODE_ROOT:
+                // the config version is not needed
                 return true
             }
             if latestConfigVersion == nil {
@@ -117,12 +119,9 @@ func (self *RunWorker) Run() {
             Err.Printf("Deploy version=%s, configVersion=%s\n", self.deployedVersion, self.deployedConfigVersion)
             func() {
                 announceRunStart()
-                defer func() {
-                    if err := recover(); err != nil {
-                        Err.Printf("Deploy error version=%s, configVersion=%s: %s\n", self.deployedVersion, self.deployedConfigVersion, err)
-                        announceRunError()
-                    }
-                }()
+                // do not recover() errors from `deploy()`
+                // the expected behavior on error is to exit the run worker
+                // the control launcher should restart the run worker
                 err := self.deploy()
                 if err != nil {
                     Err.Printf("Deploy fail version=%s, configVersion=%s: %s\n", self.deployedVersion, self.deployedConfigVersion, err)
@@ -145,6 +144,8 @@ func (self *RunWorker) Run() {
 
         self.quitEvent.WaitForSet(5 * time.Second)
     }
+
+    Err.Printf("Run worker stop.")
 }
 
 // service version, config version

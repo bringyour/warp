@@ -352,7 +352,7 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
         url = *dockerHubReposResponse.NextUrl
     }
 
-    fmt.Printf("Found repo names %s\n", strings.Join(repoNames, ", "))
+    Err.Printf("Found repo names %s\n", strings.Join(repoNames, ", "))
 
     envVersionMetas := map[string]map[string]*VersionMeta{}
 
@@ -502,24 +502,24 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
         semverSortWithBuild(configVersions)
 
         if 0 < len(statusVersions.errors) {
-            fmt.Printf("** errors **:\n")
+            Err.Printf("** errors **:\n")
             for errorMessage, count := range statusVersions.errors {
-                fmt.Printf("    %s: %d\n", errorMessage, count)
+                Err.Printf("    %s: %d\n", errorMessage, count)
             }
         }
 
-        fmt.Printf("%s versions:\n", service)
+        Err.Printf("%s versions:\n", service)
         for _, version := range serviceVersions {
             count := statusVersions.versions[version]
             percent := 100.0 * count / serviceCount
-            fmt.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
+            Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
-        fmt.Printf("config versions:\n")
+        Err.Printf("config versions:\n")
         for _, version := range configVersions {
             count := statusVersions.configVersions[version]
             percent := 100.0 * count / configCount
-            fmt.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
+            Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
         if targetVersion == "" {
@@ -531,7 +531,7 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
             break
         }
 
-        fmt.Printf("\n")
+        Err.Printf("\n")
 
         time.Sleep(10 * time.Second)
     }

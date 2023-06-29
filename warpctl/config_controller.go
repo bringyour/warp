@@ -1556,8 +1556,8 @@ func (self *SystemdUnits) serviceUnit(service string, block string, shortBlock s
     ExecStop=/bin/kill -s TERM $MAINPID
     TimeoutStopSec=60
     Restart=always
-    StandardOutput=file:/var/log/warp/{{.env}}-{{.service}}-{{.shortBlock}}.out
-    StandardError=file:/var/log/warp/{{.env}}-{{.service}}-{{.shortBlock}}.err
+    StandardOutput=append:/var/log/warp/{{.env}}-{{.service}}-{{.shortBlock}}.out
+    StandardError=append:/var/log/warp/{{.env}}-{{.service}}-{{.shortBlock}}.err
 
     [Install]
     WantedBy=multi-user.target

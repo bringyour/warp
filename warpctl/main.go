@@ -31,7 +31,7 @@ var Out *log.Logger
 var Err *log.Logger
 
 func init() {
-    Out = log.New(os.Stdout, "", log.Ldate | log.Ltime | log.Lshortfile)
+    Out = log.New(os.Stdout, "", 0)
     Err = log.New(os.Stderr, "", log.Ldate | log.Ltime | log.Lshortfile)
 }
 
@@ -875,6 +875,12 @@ func serviceRun(opts docopt.Opts) {
     var portBlocks *PortBlocks
     if portBlocksStr, err := opts.String("--portblocks"); err == nil {
         portBlocks = parsePortBlocks(portBlocksStr)
+    } else {
+        // no service ports
+        portBlocks = &PortBlocks{
+            externalsToInternals: map[int][]int{},
+            externalsToService: map[int]int{},
+        }
     }
     
     servicesDockerNetStr, _ := opts.String("--services_dockernet")
@@ -1046,7 +1052,7 @@ func createUnits(opts docopt.Opts) {
     if path, err := opts.String("--target_warpctl"); err == nil {
         targetWarpctl = path
     } else {
-        targetWarpctl = "/usr/local/bin/warpctl"
+        targetWarpctl = "/usr/local/sbin/warpctl"
     }
 
     var outDir string

@@ -190,6 +190,7 @@ func (self *RunWorker) initRoutingTable() {
 
     tableNumberStr := strconv.Itoa(self.routingTable.tableNumber)
 
+    // ip route list table <table>
     runAndLog(sudo(
         "ip", "route", "replace", self.routingTable.interfaceIpv4Subnet, 
         "dev", self.routingTable.interfaceName, 
@@ -215,6 +216,7 @@ func (self *RunWorker) initRoutingTable() {
         "table", tableNumberStr,
     ))
 
+    // ip rule list table <table>
     /*
     32737:  from 172.19.0.0/16 lookup warp1
     32738:  from 192.168.208.1 lookup warp1
@@ -240,7 +242,7 @@ func (self *RunWorker) initRoutingTable() {
     // - interface ip (sockets bound to the interface)
     // - docker interface subnet (sockets in docker containers in the network)
     for _, from := range []string{
-        self.routingTable.interfaceIpv4Gateway,
+        self.routingTable.interfaceIpv4,
         self.dockerNetwork.interfaceIpv4Subnet,
     } {
         if tableName, ok := ipRuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {

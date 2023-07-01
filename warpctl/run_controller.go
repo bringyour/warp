@@ -9,7 +9,7 @@ import (
     "fmt"
     "strconv"
     "errors"
-    "path"
+    "path/filepath"
     "net"
     "net/http"
     "io"
@@ -484,7 +484,7 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
 
     switch self.configMountMode {
     case MOUNT_MODE_YES:
-        configVersionHome := path.Join(
+        configVersionHome := filepath.Join(
             self.warpState.warpSettings.RequireConfigHome(),
             self.deployedConfigVersion.String(),
         )

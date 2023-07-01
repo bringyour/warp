@@ -4,7 +4,7 @@ import (
     "fmt"
     "os"
     "os/exec"
-    "path"
+    "path/filepath"
     // "encoding/json"
     "time"
     "strings"
@@ -322,10 +322,16 @@ func build(opts docopt.Opts) {
     env, _ := opts.String("<env>")
 
     makefile, _ := opts.String("<Makefile>")
-    makefileName := path.Base(makefile)
-    makfileDirPath := path.Dir(makefile)
+    absMakefile, _ := filepath.Abs(makefile)
+
+    if info, err := os.Stat(absMakefile); errors.Is(err, os.ErrNotExist) || !info.Mode().IsRegular() {
+        panic(fmt.Sprintf("Makefile does not exist (%s)", absMakefile))
+    }
+
+    makefileName := filepath.Base(absMakefile)
+    makfileDirPath := filepath.Dir(absMakefile)
     // the dir name is the service name
-    service := path.Base(makfileDirPath)
+    service := filepath.Base(makfileDirPath)
 
     if makefileName != "Makefile" {
         panic("Makefile must point to file named Makefile")
@@ -839,7 +845,7 @@ func lbCreateConfig(opts docopt.Opts) {
             // <dir>/<block>.conf
             unitFileName := fmt.Sprintf("%s.conf", block)
             err := os.WriteFile(
-                path.Join(outDir, unitFileName),
+                filepath.Join(outDir, unitFileName),
                 []byte(config),
                 0644,
             )
@@ -1087,11 +1093,11 @@ func createUnits(opts docopt.Opts) {
         } else {
             // write to file
             // <dir>/<host>/warp-<env>-<service>-<shortBlock>.service
-            hostDir := path.Join(outDir, host)
+            hostDir := filepath.Join(outDir, host)
             os.MkdirAll(hostDir, 0755)
             unitFileName := fmt.Sprintf("warp-%s-%s-%s.service", env, service, units.shortBlock)
             err := os.WriteFile(
-                path.Join(hostDir, unitFileName),
+                filepath.Join(hostDir, unitFileName),
                 []byte(units.serviceUnit),
                 0644,
             )

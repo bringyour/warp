@@ -7,7 +7,7 @@ import (
     "os"
     "io"
     // "os/exec"
-    "path"
+    "path/filepath"
     "encoding/json"
     "time"
     // "strings"
@@ -87,37 +87,43 @@ func (self *WarpSettings) RequireDockerHubToken() string {
     return *self.DockerHubToken
 }
 
-func (self *WarpSettings) RequireVaultHome() string {
-    if self.VaultHome == nil {
-        warpHome := os.Getenv("WARP_HOME")
-        if warpHome == "" {
-            panic("WARP_VAULT_HOME is not set. Use warpctl init.")
-        } else {
-            return path.Join(warpHome, "vault")
-        }
+func (self *WarpSettings) RequireWarpHome() string {
+    warpHome := os.Getenv("WARP_HOME")
+    if warpHome != "" {
+        return warpHome
     }
-    return *self.VaultHome
+    panic("WARP_HOME is not set. Use warpctl init.")
+}
+
+func (self *WarpSettings) RequireVaultHome() string {
+    if self.VaultHome != nil {
+        return *self.VaultHome
+    }
+    warpVaultHome := os.Getenv("WARP_VAULT_HOME")
+    if warpVaultHome != "" {
+        return warpVaultHome
+    }
+    return return filepath.Join(self.RequireWarpHome(), "vault")
 }
 
 func (self *WarpSettings) RequireConfigHome() string {
-    if self.ConfigHome == nil {
-        warpHome := os.Getenv("WARP_HOME")
-        if warpHome == "" {
-            panic("WARP_CONFIG_HOME is not set. Use warpctl init.")
-        } else {
-            return path.Join(warpHome, "config")
-        }
+    if self.ConfigHome != nil {
+        return *self.COonfigHome
     }
-    return *self.ConfigHome
+    warpVaultHome := os.Getenv("WARP_VAULT_HOME")
+    if warpVaultHome != "" {
+        return warpVaultHome
+    }
+    return return filepath.Join(self.RequireWarpHome(), "vault")
 }
 
 func (self *WarpSettings) RequireSiteHome() string {
     if self.ConfigHome == nil {
         warpHome := os.Getenv("WARP_HOME")
         if warpHome == "" {
-            panic("WARP_SITE_HOME is not set. Use warpctl init.")
+            panic("WARP_HOME is not set. Use warpctl init.")
         } else {
-            return path.Join(warpHome, "site")
+            return filepath.Join(warpHome, "site")
         }
     }
     return *self.SiteHome
@@ -142,7 +148,7 @@ func getWarpState() *WarpState {
     var err error
 
     var warpSettings WarpSettings
-    warpJson, err := os.ReadFile(path.Join(warpHome, "warp.json"))
+    warpJson, err := os.ReadFile(filepath.Join(warpHome, "warp.json"))
     if err == nil {
         err = json.Unmarshal(warpJson, &warpSettings)
         if err != nil {
@@ -151,7 +157,7 @@ func getWarpState() *WarpState {
     }
 
     var versionSettings VersionSettings
-    versionJson, err := os.ReadFile(path.Join(warpVersionHome, "version.json"))
+    versionJson, err := os.ReadFile(filepath.Join(warpVersionHome, "version.json"))
     if err == nil {
         err = json.Unmarshal(versionJson, &versionSettings)
         if err != nil {
@@ -184,7 +190,7 @@ func setWarpState(state *WarpState) {
     if err != nil {
         panic(err)
     }
-    err = os.WriteFile(path.Join(warpHome, "warp.json"), warpJson, os.FileMode(0770))
+    err = os.WriteFile(filepath.Join(warpHome, "warp.json"), warpJson, os.FileMode(0770))
     if err != nil {
         panic(err)
     }
@@ -193,7 +199,7 @@ func setWarpState(state *WarpState) {
     if err != nil {
         panic(err)
     }
-    err = os.WriteFile(path.Join(warpVersionHome, "version.json"), versionJson, os.FileMode(0770))
+    err = os.WriteFile(filepath.Join(warpVersionHome, "version.json"), versionJson, os.FileMode(0770))
     if err != nil {
         panic(err)
     }

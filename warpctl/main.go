@@ -338,15 +338,19 @@ func build(opts docopt.Opts) {
     }
 
     state := getWarpState()
-    version := state.getVersion(true, true)
+    version := state.getVersion(true, false)
+    dockerVersion := convertVersionToDocker(version)
 
     envVars := map[string]string{
         "WARP_VAULT_HOME": state.warpSettings.RequireVaultHome(),
         "WARP_CONFIG_HOME": state.warpSettings.RequireConfigHome(),
         "WARP_SITE_HOME": state.warpSettings.RequireSiteHome(),
-        "WARP_DOCKER_NAMESPACE": state.warpSettings.RequireDockerNamespace(),
         "WARP_VERSION": version,
         "WARP_ENV": env,
+        "WARP_SERVICE": service,
+        "WARP_DOCKER_NAMESPACE": state.warpSettings.RequireDockerNamespace(),
+        "WARP_DOCKER_IMAGE": fmt.Sprintf("%s-%s", env, service),
+        "WARP_DOCKER_VERSION": dockerVersion,
     }
 
     makeCommand := exec.Command("make")

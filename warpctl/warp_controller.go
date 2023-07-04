@@ -103,30 +103,29 @@ func (self *WarpSettings) RequireVaultHome() string {
     if warpVaultHome != "" {
         return warpVaultHome
     }
-    return return filepath.Join(self.RequireWarpHome(), "vault")
+    return filepath.Join(self.RequireWarpHome(), "vault")
 }
 
 func (self *WarpSettings) RequireConfigHome() string {
     if self.ConfigHome != nil {
-        return *self.COonfigHome
+        return *self.ConfigHome
     }
-    warpVaultHome := os.Getenv("WARP_VAULT_HOME")
-    if warpVaultHome != "" {
-        return warpVaultHome
+    warpConfigHome := os.Getenv("WARP_CONFIG_HOME")
+    if warpConfigHome != "" {
+        return warpConfigHome
     }
-    return return filepath.Join(self.RequireWarpHome(), "vault")
+    return filepath.Join(self.RequireWarpHome(), "config")
 }
 
 func (self *WarpSettings) RequireSiteHome() string {
-    if self.ConfigHome == nil {
-        warpHome := os.Getenv("WARP_HOME")
-        if warpHome == "" {
-            panic("WARP_HOME is not set. Use warpctl init.")
-        } else {
-            return filepath.Join(warpHome, "site")
-        }
+    if self.SiteHome != nil {
+        return *self.SiteHome
     }
-    return *self.SiteHome
+    warpSiteHome := os.Getenv("WARP_SITE_HOME")
+    if warpSiteHome != "" {
+        return warpSiteHome
+    }
+    return filepath.Join(self.RequireWarpHome(), "site")
 }
 
 

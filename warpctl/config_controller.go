@@ -683,6 +683,7 @@ func NewNginxConfig(env string, envAliases []string) (*NginxConfig, error) {
 
     // note that all aliases must be covered by the same tls cert as the main domain
     relativeTlsPemPath, relativeTlsKeyPath, err := findLatestTls(
+        env,
         servicesConfig.Domain,
         servicesConfig.isTlsWildcard(),
     )
@@ -702,69 +703,79 @@ func NewNginxConfig(env string, envAliases []string) (*NginxConfig, error) {
     return nginxConfig, nil
 }
 
-func findLatestTls(domain string, wildcard bool) (relativeTlsPemPath string, relativeTlsKeyPath string, err error) {
+func findLatestTls(env string, domain string, wildcard bool) (relativeTlsPemPath string, relativeTlsKeyPath string, err error) {
     state := getWarpState()
-    vaultHome := state.warpSettings.RequireVaultHome()
-    // tlsHome := filepath.Join(vaultHome, "tls")
 
-    // domainSuffix := strings.ReplaceAll(domain, ".", "_")
-
-    var keyDirName string
-    var pemFileName string
-    var keyFileName string
-    if wildcard {
-        keyDirName = fmt.Sprintf("star.%s", domain)
-        pemFileName = fmt.Sprintf("star.%s.pem", domain)
-        keyFileName = fmt.Sprintf("star.%s.key", domain)
-    } else {
-        keyDirName = domain
-        pemFileName = fmt.Sprintf("%s.pem", domain)
-        keyFileName = fmt.Sprintf("%s.key", domain)
-    }
-
-    hasTlsFiles := func(dirPath string)(bool) {
-        Err.Printf("Tls searching dir %s\n", dirPath)
-        for _, fileName := range []string{pemFileName, keyFileName} {
-            if _, err := os.Stat(filepath.Join(dirPath, keyDirName, fileName)); errors.Is(err, os.ErrNotExist) {
-                return false
-            }
+    find := func(home string)(error) {
+        var keyDirName string
+        var pemFileName string
+        var keyFileName string
+        if wildcard {
+            keyDirName = fmt.Sprintf("star.%s", domain)
+            pemFileName = fmt.Sprintf("star.%s.pem", domain)
+            keyFileName = fmt.Sprintf("star.%s.key", domain)
+        } else {
+            keyDirName = domain
+            pemFileName = fmt.Sprintf("%s.pem", domain)
+            keyFileName = fmt.Sprintf("%s.key", domain)
         }
-        return true
-    }
 
-    entries, err := os.ReadDir(filepath.Join(vaultHome, "tls"))
-    if err != nil {
-        panic(err)
-    }
-    versionDirNames := map[*semver.Version]string{}
-    for _, entry := range entries {
-        if entry.IsDir() {
-            if version, err := semver.NewVersion(entry.Name()); err == nil {
-                if hasTlsFiles(filepath.Join(vaultHome, "tls", entry.Name())) {
-                    versionDirNames[version] = entry.Name()
+        hasTlsFiles := func(dirPath string)(bool) {
+            Err.Printf("Tls searching dir %s\n", dirPath)
+            for _, fileName := range []string{pemFileName, keyFileName} {
+                if _, err := os.Stat(filepath.Join(dirPath, keyDirName, fileName)); errors.Is(err, os.ErrNotExist) {
+                    return false
                 }
             }
+            return true
         }
+
+        if entries, err := os.ReadDir(filepath.Join(home, "tls")); err == nil {
+            versionDirNames := map[*semver.Version]string{}
+            for _, entry := range entries {
+                if entry.IsDir() {
+                    if version, err := semver.NewVersion(entry.Name()); err == nil {
+                        if hasTlsFiles(filepath.Join(home, "tls", entry.Name())) {
+                            versionDirNames[version] = entry.Name()
+                        }
+                    }
+                }
+            }
+
+            versions := maps.Keys(versionDirNames)
+            semverSortWithBuild(versions)
+            if 0 < len(versions) {
+                version := versions[len(versions) - 1]
+                versionDirName := versionDirNames[version]
+                relativeTlsPemPath = filepath.Join("tls", versionDirName, keyDirName, pemFileName)
+                relativeTlsKeyPath = filepath.Join("tls", versionDirName, keyDirName, keyFileName)
+                return nil
+            }
+
+            // no version
+            if hasTlsFiles(home) {
+                relativeTlsPemPath = pemFileName
+                relativeTlsKeyPath = keyFileName
+                return nil
+            }
+        }
+
+        return errors.New(fmt.Sprintf("TLS files %s and %s not found.", pemFileName, keyFileName))
     }
 
-    versions := maps.Keys(versionDirNames)
-    semverSortWithBuild(versions)
-    if 0 < len(versions) {
-        version := versions[len(versions) - 1]
-        versionDirName := versionDirNames[version]
-        relativeTlsPemPath = filepath.Join("tls", versionDirName, keyDirName, pemFileName)
-        relativeTlsKeyPath = filepath.Join("tls", versionDirName, keyDirName, keyFileName)
+    // resolve relative to
+    // - vault/<env>
+    // - vault/all
+    vaultHome := state.warpSettings.RequireVaultHome()
+    err = find(filepath.Join(vaultHome, env))
+    if err == nil {
+        return
+    }
+    err = find(filepath.Join(vaultHome, "all"))
+    if err == nil {
         return
     }
 
-    // no version
-    if hasTlsFiles(vaultHome) {
-        relativeTlsPemPath = pemFileName
-        relativeTlsKeyPath = keyFileName
-        return
-    }
-
-    err = errors.New(fmt.Sprintf("TLS files %s and %s not found.", pemFileName, keyFileName))
     return
 }
 

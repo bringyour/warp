@@ -101,14 +101,9 @@ func (self *RunWorker) Run() {
             case MOUNT_MODE_NO, MOUNT_MODE_ROOT:
                 // the config version is not needed
                 return true
+            default:
+                return latestConfigVersion != nil
             }
-            if latestConfigVersion == nil {
-                return false
-            }
-            if self.deployedConfigVersion != nil && *self.deployedConfigVersion == *latestConfigVersion {
-                return false
-            }
-            return true
         }()
 
         if deployVersion {
@@ -149,38 +144,33 @@ func (self *RunWorker) Run() {
 }
 
 // service version, config version
-func (self *RunWorker) getLatestVersion() (*semver.Version, *semver.Version) {
+func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latestConfigVersion *semver.Version) {
     versionMeta := self.dockerHubClient.getVersionMeta(self.env, self.service)
-    latestVersion := versionMeta.latestBlocks[self.block]
+    latestVersion = versionMeta.latestBlocks[self.block]
 
-    var latestConfigVersion *semver.Version
-    if self.warpState.warpSettings.ConfigHome == nil {
-        latestConfigVersion = nil
-    } else {
-        entries, err := os.ReadDir(*self.warpState.warpSettings.ConfigHome)
-        if err != nil {
-            panic(err)
-        }
-
-        configVersions := []*semver.Version{}
-        for _, entry := range entries {
-            if entry.IsDir() {
-                if version, err := semver.NewVersion(entry.Name()); err == nil {
-                    configVersions = append(configVersions, version)
-                }
-            }
-        }
-        semverSortWithBuild(configVersions)
-
-        
-        if len(configVersions) == 0 {
-            latestConfigVersion = nil
-        } else {
-            latestConfigVersion = configVersions[len(configVersions) - 1]
-        }
+    entries, err := os.ReadDir(self.warpState.warpSettings.RequireConfigHome())
+    if err != nil {
+        panic(err)
     }
 
-    return latestVersion, latestConfigVersion
+    configVersions := []*semver.Version{}
+    for _, entry := range entries {
+        Err.Printf("TEST CONFIG ENTRY %s\n", entry.Name())
+        if entry.IsDir() {
+            if version, err := semver.NewVersion(entry.Name()); err == nil {
+                configVersions = append(configVersions, version)
+            }
+        }
+    }
+    semverSortWithBuild(configVersions)
+    
+    if len(configVersions) == 0 {
+        latestConfigVersion = nil
+    } else {
+        latestConfigVersion = configVersions[len(configVersions) - 1]
+    }
+
+    return
 }
 
 func (self *RunWorker) initRoutingTable() {
@@ -525,6 +515,9 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
         "WARP_ENV": self.env,
         "WARP_SERVICE": self.service,
         "WARP_BLOCK": self.block,
+    }
+    if host, err := os.Hostname(); err == nil {
+        env["WARP_HOST"] = host
     }
     if self.deployedConfigVersion != nil {
         env["WARP_CONFIG_VERSION"] = self.deployedConfigVersion.String()

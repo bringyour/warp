@@ -12,11 +12,6 @@ import (
     "regexp"
     "net"
     "runtime"
-    "sync"
-    "time"
-    "os"
-    "os/signal"
-    "syscall"
 
     "golang.org/x/exp/slices"
 
@@ -314,64 +309,6 @@ func mapStr[KT comparable, VT any](m map[KT]VT) string {
 
 
 
-type Event struct {
-    mutex sync.Mutex
-    value bool
-    interrupt chan bool
-}
-
-func NewEvent() *Event {
-    return &Event{
-        interrupt: make(chan bool, 0),
-    }
-}
-
-func (self *Event) Set() {
-    self.mutex.Lock()
-    defer self.mutex.Unlock()
-    self.value = true
-    close(self.interrupt)
-}
-
-func (self *Event) IsSet() bool {
-    self.mutex.Lock()
-    defer self.mutex.Unlock()
-    return self.value
-}
-
-func (self *Event) WaitForSet(timeout time.Duration) bool {
-    if !self.IsSet() {
-        select {
-        case <- self.interrupt:
-        case <- time.After(timeout):
-        }
-    }
-    return self.IsSet()
-}
-
-func (self *Event) SetOnSignals(signalValues ...syscall.Signal) func() {
-    stopSignal := make(chan os.Signal, len(signalValues))
-    for _, signalValue := range signalValues {
-        signal.Notify(stopSignal, signalValue)
-    }
-    go func() {
-        for {
-            select {
-            case sig, ok := <- stopSignal:
-                if ok {
-                    Err.Printf("Stop signal detected (%d).\n", sig)
-                    self.Set()
-                } else {
-                    return
-                }
-            }
-        }
-    }()
-    return func(){
-        signal.Stop(stopSignal)
-        close(stopSignal)
-    }
-}
 
 
 

@@ -77,9 +77,11 @@ func (self *RunWorker) Run() {
 
     // enable policy routing
     if self.routingTable != nil {
-        self.initRoutingTable()
+        self.initRoutingTableIpv4()
+        self.initRoutingTableIpv6()
     }
 
+    self.initSys()
     self.initBlockRedirect()
 
     self.deployedVersion = nil
@@ -173,39 +175,43 @@ func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latest
     return
 }
 
-func (self *RunWorker) initRoutingTable() {
+func (self *RunWorker) initRoutingTableIpv4() {
     // ** important: restarting warpctl should not interrupt running services **
     // this does not remove routes/tables or rules to avoid interrupting running services
     // instead missing rules are added
 
     tableNumberStr := strconv.Itoa(self.routingTable.tableNumber)
 
+    // local traffic on docker is router via ipv4
+    // docker port forward listens to incoming on both ipv4 and ipv6
+
     // ip route list table <table>
     runAndLog(sudo(
-        "ip", "route", "replace", self.routingTable.interfaceIpv4Subnet, 
-        "dev", self.routingTable.interfaceName, 
-        "src", self.routingTable.interfaceIpv4, 
+        "ip", "route", "replace", self.routingTable.ipv4.interfaceSubnet, 
+        "dev", self.routingTable.ipv4.interfaceName, 
+        "src", self.routingTable.ipv4.interfaceIp, 
         "table", tableNumberStr,
     ))
     runAndLog(sudo(
-        "ip", "route", "replace", self.servicesDockerNetwork.interfaceIpv4Subnet, 
+        "ip", "route", "replace", self.servicesDockerNetwork.interfaceSubnet, 
         "dev", self.servicesDockerNetwork.interfaceName,
-        "src", self.servicesDockerNetwork.interfaceIpv4,
+        "src", self.servicesDockerNetwork.interfaceIp,
         "table", tableNumberStr,
     ))
     runAndLog(sudo(
-        "ip", "route", "replace", self.dockerNetwork.interfaceIpv4Subnet, 
+        "ip", "route", "replace", self.dockerNetwork.interfaceSubnet, 
         "dev", self.dockerNetwork.interfaceName,
-        "src", self.dockerNetwork.interfaceIpv4,
+        "src", self.dockerNetwork.interfaceIp,
         "table", tableNumberStr,
     ))
     runAndLog(sudo(
         "ip", "route", "add", "default",
-        "via", self.routingTable.interfaceIpv4Gateway,
-        "dev", self.routingTable.interfaceName,
+        "via", self.routingTable.ipv4.interfaceGateway,
+        "dev", self.routingTable.ipv4.interfaceName,
         "table", tableNumberStr,
     ))
 
+    
     // ip rule list table <table>
     /*
     32737:  from 172.19.0.0/16 lookup warp1
@@ -213,17 +219,17 @@ func (self *RunWorker) initRoutingTable() {
     32739:  from 172.19.0.0/16 lookup warp1
     32740:  from 192.168.208.1 lookup warp1
     */
-    ipRuleFromLookups := map[string]string{}
-    ruleRegex := regexp.MustCompile("^\\s*.*\\s+from\\s+(\\S+)\\s+lookup\\s+(\\S+)\\s*$")
+    ipv4RuleFromLookups := map[string]string{}
     if out, err := sudo(
         "ip", "rule", "list", "table", tableNumberStr,
     ).Output(); err == nil {
+        ruleRegex := regexp.MustCompile("^\\s*.*\\s+from\\s+(\\S+)\\s+lookup\\s+(\\S+)\\s*$")
         for _, line := range strings.Split(string(out), "\n") {
             if groups := ruleRegex.FindStringSubmatch(line); groups != nil {
                 from := groups[1]
                 // `ip rule list table X` shows lookup table names not numbers
                 tableName := groups[2]
-                ipRuleFromLookups[from] = tableName
+                ipv4RuleFromLookups[from] = tableName
             }
         }
     }
@@ -232,12 +238,61 @@ func (self *RunWorker) initRoutingTable() {
     // - interface ip (sockets bound to the interface)
     // - docker interface subnet (sockets in docker containers in the network)
     for _, from := range []string{
-        self.routingTable.interfaceIpv4,
-        self.dockerNetwork.interfaceIpv4Subnet,
+        self.routingTable.ipv4.interfaceIp,
+        self.dockerNetwork.interfaceSubnet,
     } {
-        if tableName, ok := ipRuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {
+        if tableName, ok := ipv4RuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {
             runAndLog(sudo(
                 "ip", "rule", "add",
+                "from", from,
+                "table", tableNumberStr,
+            ))
+        }
+    }
+}
+
+func (self *RunWorker) initRoutingTableIpv6() {
+    if self.routingTable.ipv6 == nil {
+        return
+    }
+
+    tableNumberStr := strconv.Itoa(self.routingTable.tableNumber)
+
+    runAndLog(sudo(
+        "ip", "-6", "route", "replace", self.routingTable.ipv6.interfaceSubnet, 
+        "dev", self.routingTable.ipv6.interfaceName,
+        "src", self.routingTable.ipv6.interfaceIp,
+        "table", tableNumberStr,
+    ))    
+    runAndLog(sudo(
+        "ip", "-6", "route", "add", "default",
+        "via", self.routingTable.ipv6.interfaceGateway,
+        "dev", self.routingTable.ipv6.interfaceName,
+        "table", tableNumberStr,
+    ))
+
+
+    ipv6RuleFromLookups := map[string]string{}
+    if out, err := sudo(
+        "ip", "-6", "rule", "list", "table", tableNumberStr,
+    ).Output(); err == nil {
+        ruleRegex := regexp.MustCompile("^\\s*.*\\s+from\\s+(\\S+)\\s+lookup\\s+(\\S+)\\s*$")
+        for _, line := range strings.Split(string(out), "\n") {
+            if groups := ruleRegex.FindStringSubmatch(line); groups != nil {
+                from := groups[1]
+                // `ip -6 rule list table X` shows lookup table names not numbers
+                tableName := groups[2]
+                ipv6RuleFromLookups[from] = tableName
+            }
+        }
+    }
+
+    for _, from := range []string{
+        self.routingTable.ipv6.interfaceIp,
+    } {
+        if tableName, ok := ipv6RuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {
+            runAndLog(sudo(
+                "ip", "-6", "rule", "add",
                 "from", from,
                 "table", tableNumberStr,
             ))
@@ -286,6 +341,13 @@ func (self *RunWorker) iptablesChainName() string {
         panic(fmt.Sprintf("iptables chain name cannot exceed %d chars", maxLen))
     }
     return chainName
+}
+
+func (self *RunWorker) initSys() {
+    cmd := sudo("sysctl", "-w", "net.ipv6.bindv6only=1")
+    if err := runAndLog(cmd); err != nil {
+        panic(err)
+    }
 }
 
 func (self *RunWorker) initBlockRedirect() {
@@ -448,7 +510,9 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
         "--restart=on-failure",
     }
     for servicePort, internalPort := range servicePortsToInternalPort {
-        args = append(args, []string{"-p", fmt.Sprintf("%d:%d", internalPort, servicePort)}...)
+        // [::] listens to both ipv4 and ipv6
+        // the host must have `sysctl -w net.ipv6.bindv6only=1`
+        args = append(args, []string{"-p", fmt.Sprintf("[::]:%d:%d", internalPort, servicePort)}...)
     }
     if self.dockerNetwork != nil {
         args = append(args, []string{"--network", self.dockerNetwork.networkName}...)
@@ -456,9 +520,9 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
         args = append(args, []string{"--network", self.servicesDockerNetwork.networkName}...)
     }
     if self.dockerNetwork != nil {
-        args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.dockerNetwork.networkName, self.dockerNetwork.interfaceIpv4)}...)
+        args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.dockerNetwork.networkName, self.dockerNetwork.interfaceIp)}...)
     }
-    args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.servicesDockerNetwork.networkName, self.servicesDockerNetwork.interfaceIpv4)}...)
+    args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.servicesDockerNetwork.networkName, self.servicesDockerNetwork.interfaceIp)}...)
 
     switch self.vaultMountMode {
     case MOUNT_MODE_YES:
@@ -519,6 +583,14 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
     if host, err := os.Hostname(); err == nil {
         env["WARP_HOST"] = host
     }
+    
+    // service_port:internal_port
+    portParts := []string{}
+    for servicePort, internalPort := range servicePortsToInternalPort {
+        portParts = append(portParts, fmt.Sprintf("%d:%d", servicePort, internalPort))
+    }
+    env["WARP_PORTS"] = strings.Join(portParts, ",")
+
     if self.deployedConfigVersion != nil {
         env["WARP_CONFIG_VERSION"] = self.deployedConfigVersion.String()
     }
@@ -809,11 +881,12 @@ func parsePortBlocks(portBlocksStr string) *PortBlocks {
 
 type NetworkInterface struct {
     interfaceName string
-    interfaceIpv4 string
-    interfaceIpv4Subnet string
-    interfaceIpv4Gateway string
+    interfaceIp string
+    interfaceSubnet string
+    interfaceGateway string
 }
 
+// local docker is always ipv4
 type DockerNetwork struct {
     networkName string
     NetworkInterface
@@ -823,30 +896,30 @@ func parseDockerNetwork(dockerNetworkStr string) *DockerNetwork {
     // assume the network name is the interface name
     interfaceName := dockerNetworkStr
 
-    networkInterfaces, err := getNetworkInterfaces(interfaceName)
+    v4NetworkInterfaces, _, err := getNetworkInterfaces(interfaceName)
     if err != nil {
         panic(err)
     }
-    if len(networkInterfaces) == 0 {
-        panic(errors.New(fmt.Sprintf("Could not map docker interface %s to interface", interfaceName)))
+    if len(v4NetworkInterfaces) == 0 {
+        panic(errors.New(fmt.Sprintf("Could not find interface %s", interfaceName)))
     }
-    if 1 < len(networkInterfaces) {
+    if 1 < len(v4NetworkInterfaces) {
         panic(errors.New(fmt.Sprintf("More than one network attached to interface %s", interfaceName)))
     }
-    networkInterface := networkInterfaces[0]
+    v4NetworkInterface := v4NetworkInterfaces[0]
 
     return &DockerNetwork{
         networkName: dockerNetworkStr,
-        NetworkInterface: *networkInterface,
+        NetworkInterface: *v4NetworkInterface,
     }
 }
-
 
 type RoutingTable struct {
     interfaceName string
     tableNumber int
     tableName string
-    NetworkInterface
+    ipv4 NetworkInterface
+    ipv6 *NetworkInterface
 }
 
 // interface:rt_table_name
@@ -879,72 +952,112 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
         panic(fmt.Sprintf("Routing table %d does not exist.", tableNumber))
     }
 
-    networkInterfaces, err := getNetworkInterfaces(interfaceName)
+    v4NetworkInterfaces, v6NetworkInterfaces, err := getNetworkInterfaces(interfaceName)
     if err != nil {
         panic(err)
     }
-    if len(networkInterfaces) == 0 {
-        panic(errors.New(fmt.Sprintf("Could not find interface %s", interfaceName)))
+
+    // v4 must be present
+    var v4NetworkInterface *NetworkInterface
+    if len(v4NetworkInterfaces) == 0 {
+        panic(errors.New(fmt.Sprintf("Could not map docker interface %s to interface", interfaceName)))
+    } else if 1 < len(v4NetworkInterfaces) {
+        panic(errors.New(fmt.Sprintf("More than one v4 network attached to interface %s", interfaceName)))
+    } else {
+        v4NetworkInterface = v4NetworkInterfaces[0]
     }
-    if 1 < len(networkInterfaces) {
-        panic(errors.New(fmt.Sprintf("More than one network attached to interface %s", interfaceName)))
+
+    var v6NetworkInterface *NetworkInterface
+    if 0 == len(v6NetworkInterfaces) {
+        v6NetworkInterface = nil
+    } else if 1 < len(v6NetworkInterfaces) {
+        panic(errors.New(fmt.Sprintf("More than one v6 network attached to interface %s", interfaceName)))
+    } else {
+        v6NetworkInterface = v6NetworkInterfaces[0]
     }
-    networkInterface := networkInterfaces[0]
 
     return &RoutingTable{
         interfaceName: interfaceName,
         tableNumber: tableNumber,
         tableName: tableName,
-        NetworkInterface: *networkInterface,
+        ipv4: *v4NetworkInterface,
+        ipv6: v6NetworkInterface,
     }
 }
 
 
-func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, error) {
+func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, []*NetworkInterface, error) {
     // see https://github.com/golang/go/issues/12551
 
     iface, err := net.InterfaceByName(interfaceName)
     if err != nil {
-        return nil, err
+        return nil, nil, err
     }
 
     addrs, err := iface.Addrs()
     if err != nil {
-        return nil, err
+        return nil, nil, err
     }
 
-    networkInterfaces := []*NetworkInterface{}
+    v4NetworkInterfaces := []*NetworkInterface{}
+    v6NetworkInterfaces := []*NetworkInterface{}
 
     for _, addr := range addrs {
-        if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-            zeroedIpNet := net.IPNet{
-                IP: ipNet.IP.Mask(ipNet.Mask),
-                Mask: ipNet.Mask,
-            }
+        if ipNet, ok := addr.(*net.IPNet); ok {
+            if ipNet.IP.To4() != nil {
+                zeroedIpNet := net.IPNet{
+                    IP: ipNet.IP.Mask(ipNet.Mask),
+                    Mask: ipNet.Mask,
+                }
 
-            gateway := nextIp(zeroedIpNet, 1)
+                gateway := nextIp(zeroedIpNet, 1)
 
-            networkInterface := &NetworkInterface{
-                interfaceName: interfaceName,
-                interfaceIpv4: ipNet.IP.String(),
-                interfaceIpv4Subnet: zeroedIpNet.String(),
-                interfaceIpv4Gateway: gateway.String(),
+                v4NetworkInterface := &NetworkInterface{
+                    interfaceName: interfaceName,
+                    interfaceIp: ipNet.IP.String(),
+                    interfaceSubnet: zeroedIpNet.String(),
+                    interfaceGateway: gateway.String(),
+                }
+                v4NetworkInterfaces = append(v4NetworkInterfaces, v4NetworkInterface)
+            } else if ipNet.IP.To16() != nil {
+                zeroedIpNet := net.IPNet{
+                    IP: ipNet.IP.Mask(ipNet.Mask),
+                    Mask: ipNet.Mask,
+                }
+
+                gateway := nextIp(zeroedIpNet, 1)
+
+                v6NetworkInterface := &NetworkInterface{
+                    interfaceName: interfaceName,
+                    interfaceIp: ipNet.IP.String(),
+                    interfaceSubnet: zeroedIpNet.String(),
+                    interfaceGateway: gateway.String(),
+                }
+                v6NetworkInterfaces = append(v6NetworkInterfaces, v6NetworkInterface)
             }
-            networkInterfaces = append(networkInterfaces, networkInterface)
         }
     }
 
-    for _, networkInterface := range networkInterfaces {
+    for _, v4NetworkInterface := range v4NetworkInterfaces {
         Err.Printf(
             "%s ipv4=%s ipv4_subnet=%s ipv4_gateway=%s\n",
-            networkInterface.interfaceName,
-            networkInterface.interfaceIpv4,
-            networkInterface.interfaceIpv4Subnet,
-            networkInterface.interfaceIpv4Gateway,
+            v4NetworkInterface.interfaceName,
+            v4NetworkInterface.interfaceIp,
+            v4NetworkInterface.interfaceSubnet,
+            v4NetworkInterface.interfaceGateway,
+        )
+    }
+    for _, v6NetworkInterface := range v6NetworkInterfaces {
+        Err.Printf(
+            "%s ipv6=%s ipv6_subnet=%s ipv6_gateway=%s\n",
+            v6NetworkInterface.interfaceName,
+            v6NetworkInterface.interfaceIp,
+            v6NetworkInterface.interfaceSubnet,
+            v6NetworkInterface.interfaceGateway,
         )
     }
 
-    return networkInterfaces, nil
+    return v4NetworkInterfaces, v6NetworkInterfaces, nil
 }
 
 

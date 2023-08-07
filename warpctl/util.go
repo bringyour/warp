@@ -111,6 +111,14 @@ func sudo(name string, args ...string) *exec.Cmd {
 }
 
 
+func sudo2(name []string, args ...string) *exec.Cmd {
+    flatArgs := []string{}
+    flatArgs = append(flatArgs, name...)
+    flatArgs = append(flatArgs, args...)
+    return exec.Command("sudo", flatArgs...)
+}
+
+
 func docker(name string, args ...string) *exec.Cmd {
     flatArgs := []string{}
     flatArgs = append(flatArgs, name)
@@ -254,13 +262,13 @@ func indentAndTrimString(text string, indent int) string {
 
 
 
-func nextIp(ipNet net.IPNet, count int) net.IP {
+func nextIpv4(ipNet net.IPNet, count int) net.IP {
     ip := ipNet.IP.Mask(ipNet.Mask)
     ones, _ := ipNet.Mask.Size()
     i := ones / 8
 
-    for k := 0; k < count; k += i {
-        ip[i] += 0x01 >> (ones % 8)
+    for k := 0; k < count; k += 1 {
+        ip[i] += 0x01 << (ones % 8)
         // propagate the overflow bit forward
         for j := i; ip[j] == 0 && j + 1 < len(ip); j += 1 {
             ip[j + 1] += 0x01
@@ -270,6 +278,36 @@ func nextIp(ipNet net.IPNet, count int) net.IP {
     return ip
 }
 
+
+func nextIpv6(ipNet net.IPNet, count int) net.IP {
+    ip := ipNet.IP.Mask(ipNet.Mask)
+    ones, _ := ipNet.Mask.Size()
+    i := (ones / 16) * 2
+
+    for k := 0; k < count; k += 1 {
+        f := (uint16(ip[i]) << 8) | uint16(ip[i + 1])
+        f += 0x01 << (ones % 16)
+        ip[i] = byte(f >> 8)
+        ip[i + 1] = byte(f)
+        // propagate the overflow bit forward
+        for j := i; ip[j] == 0 && ip[j + 1] == 0 && j + 3 < len(ip); j += 2 {
+            ip[j + 1] += 0x01
+            f = (uint16(ip[j + 2]) << 8) | uint16(ip[j + 3])
+            f += 1
+            ip[j + 2] = byte(f >> 8)
+            ip[i + 3] = byte(f)
+        }
+    }
+
+    return ip
+}
+
+
+func gateway(ipNet net.IPNet) net.IP {
+    ip := ipNet.IP.Mask(ipNet.Mask)
+    ip[len(ip)-1] |= 0x01
+    return ip
+}
 
 
 func semverSortWithBuild(versions []*semver.Version) {

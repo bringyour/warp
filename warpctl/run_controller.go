@@ -75,20 +75,24 @@ func (self *RunWorker) Run() {
     announceRunEnter()
     defer announceRunExit()
 
-    // enable policy routing
-    if self.routingTable != nil {
-        self.initRoutingTableIpv4()
-        self.initRoutingTableIpv6()
-    }
+    initNetwork := func() {
+        // enable policy routing
+        if self.routingTable != nil {
+            self.initRoutingTable()
+        }
 
-    self.initSys()
-    self.initBlockRedirect()
+        self.initBlockRedirect()
+    }
 
     self.deployedVersion = nil
     self.deployedConfigVersion = nil
 
     // watch for new versions until killed
     for !self.quitEvent.IsSet() {
+        // continually init the network to account for linux system changes
+        // e.g. netplan resetting all the ip rules
+        initNetwork()
+
         latestVersion, latestConfigVersion := self.getLatestVersion()
         Err.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
 
@@ -139,7 +143,7 @@ func (self *RunWorker) Run() {
             announceRunWaitForConfig()
         }
 
-        self.quitEvent.WaitForSet(5 * time.Second)
+        self.quitEvent.WaitForSet(60 * time.Second)
     }
 
     Err.Printf("Run worker stop.")
@@ -175,127 +179,101 @@ func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latest
     return
 }
 
-func (self *RunWorker) initRoutingTableIpv4() {
+func (self *RunWorker) getNetworkConfigs() []*NetworkConfig {
+    return getNetworkConfigs(self.routingTable, self.dockerNetwork)
+}
+
+func (self *RunWorker) initRoutingTable() {
     // ** important: restarting warpctl should not interrupt running services **
     // this does not remove routes/tables or rules to avoid interrupting running services
     // instead missing rules are added
 
     tableNumberStr := strconv.Itoa(self.routingTable.tableNumber)
 
-    // local traffic on docker is router via ipv4
-    // docker port forward listens to incoming on both ipv4 and ipv6
+    // services is always via ipv4
+    // lb listens to incoming on both ipv4 and ipv6
 
-    // ip route list table <table>
     runAndLog(sudo(
-        "ip", "route", "replace", self.routingTable.ipv4.interfaceSubnet, 
-        "dev", self.routingTable.ipv4.interfaceName, 
-        "src", self.routingTable.ipv4.interfaceIp, 
-        "table", tableNumberStr,
-    ))
-    runAndLog(sudo(
-        "ip", "route", "replace", self.servicesDockerNetwork.interfaceSubnet, 
-        "dev", self.servicesDockerNetwork.interfaceName,
-        "src", self.servicesDockerNetwork.interfaceIp,
-        "table", tableNumberStr,
-    ))
-    runAndLog(sudo(
-        "ip", "route", "replace", self.dockerNetwork.interfaceSubnet, 
-        "dev", self.dockerNetwork.interfaceName,
-        "src", self.dockerNetwork.interfaceIp,
-        "table", tableNumberStr,
-    ))
-    runAndLog(sudo(
-        "ip", "route", "add", "default",
-        "via", self.routingTable.ipv4.interfaceGateway,
-        "dev", self.routingTable.ipv4.interfaceName,
+        "ip", "route", "replace", self.servicesDockerNetwork.ipv4.interfaceSubnet, 
+        "dev", self.servicesDockerNetwork.ipv4.interfaceName,
+        "src", self.servicesDockerNetwork.ipv4.interfaceIp,
         "table", tableNumberStr,
     ))
 
-    
-    // ip rule list table <table>
-    /*
-    32737:  from 172.19.0.0/16 lookup warp1
-    32738:  from 192.168.208.1 lookup warp1
-    32739:  from 172.19.0.0/16 lookup warp1
-    32740:  from 192.168.208.1 lookup warp1
-    */
-    ipv4RuleFromLookups := map[string]string{}
-    if out, err := sudo(
-        "ip", "rule", "list", "table", tableNumberStr,
-    ).Output(); err == nil {
-        ruleRegex := regexp.MustCompile("^\\s*.*\\s+from\\s+(\\S+)\\s+lookup\\s+(\\S+)\\s*$")
-        for _, line := range strings.Split(string(out), "\n") {
-            if groups := ruleRegex.FindStringSubmatch(line); groups != nil {
-                from := groups[1]
-                // `ip rule list table X` shows lookup table names not numbers
-                tableName := groups[2]
-                ipv4RuleFromLookups[from] = tableName
+    for _, networkConfig := range self.getNetworkConfigs() {
+        // ip route list table <table>
+        runAndLog(sudo2(
+            networkConfig.ipCommand, "route", "replace", networkConfig.routingTable.interfaceSubnet, 
+            "dev", networkConfig.routingTable.interfaceName, 
+            "src", networkConfig.routingTable.interfaceIp, 
+            "table", tableNumberStr,
+        ))
+        runAndLog(sudo2(
+            networkConfig.ipCommand, "route", "replace", networkConfig.dockerNetwork.interfaceSubnet, 
+            "dev", networkConfig.dockerNetwork.interfaceName,
+            "src", networkConfig.dockerNetwork.interfaceIp,
+            "table", tableNumberStr,
+        ))
+        runAndLog(sudo2(
+            networkConfig.ipCommand, "route", "add", "default",
+            "via", networkConfig.routingTable.interfaceGateway,
+            "dev", networkConfig.routingTable.interfaceName,
+            "table", tableNumberStr,
+        ))
+
+        // add a masq for the interface
+        // this is not needed for ipv4 if there is a gateway router applying a masq, but do it anyway
+        masqCmd := func(op string) *exec.Cmd {
+            cmd := sudo2(
+                networkConfig.iptablesCommand, "-t", "nat", op, "POSTROUTING",
+                "-o", networkConfig.routingTable.interfaceName,
+                "-j", "MASQUERADE",
+            )
+            return cmd
+        }
+        if err := runAndLog(masqCmd("-C")); err != nil {
+            if err := runAndLog(masqCmd("-A")); err != nil {
+                panic(err)
             }
         }
-    }
 
-    // lookup to the table for packets from these sources:
-    // - interface ip (sockets bound to the interface)
-    // - docker interface subnet (sockets in docker containers in the network)
-    for _, from := range []string{
-        self.routingTable.ipv4.interfaceIp,
-        self.dockerNetwork.interfaceSubnet,
-    } {
-        if tableName, ok := ipv4RuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {
-            runAndLog(sudo(
-                "ip", "rule", "add",
-                "from", from,
-                "table", tableNumberStr,
-            ))
-        }
-    }
-}
-
-func (self *RunWorker) initRoutingTableIpv6() {
-    if self.routingTable.ipv6 == nil {
-        return
-    }
-
-    tableNumberStr := strconv.Itoa(self.routingTable.tableNumber)
-
-    runAndLog(sudo(
-        "ip", "-6", "route", "replace", self.routingTable.ipv6.interfaceSubnet, 
-        "dev", self.routingTable.ipv6.interfaceName,
-        "src", self.routingTable.ipv6.interfaceIp,
-        "table", tableNumberStr,
-    ))    
-    runAndLog(sudo(
-        "ip", "-6", "route", "add", "default",
-        "via", self.routingTable.ipv6.interfaceGateway,
-        "dev", self.routingTable.ipv6.interfaceName,
-        "table", tableNumberStr,
-    ))
-
-
-    ipv6RuleFromLookups := map[string]string{}
-    if out, err := sudo(
-        "ip", "-6", "rule", "list", "table", tableNumberStr,
-    ).Output(); err == nil {
-        ruleRegex := regexp.MustCompile("^\\s*.*\\s+from\\s+(\\S+)\\s+lookup\\s+(\\S+)\\s*$")
-        for _, line := range strings.Split(string(out), "\n") {
-            if groups := ruleRegex.FindStringSubmatch(line); groups != nil {
-                from := groups[1]
-                // `ip -6 rule list table X` shows lookup table names not numbers
-                tableName := groups[2]
-                ipv6RuleFromLookups[from] = tableName
+        
+        // ip rule list table <table>
+        /*
+        32737:  from 172.19.0.0/16 lookup warp1
+        32738:  from 192.168.208.1 lookup warp1
+        32739:  from 172.19.0.0/16 lookup warp1
+        32740:  from 192.168.208.1 lookup warp1
+        */
+        ipRuleFromLookups := map[string]string{}
+        if out, err := sudo2(
+            networkConfig.ipCommand, "rule", "list", "table", tableNumberStr,
+        ).Output(); err == nil {
+            ruleRegex := regexp.MustCompile("^\\s*.*\\s+from\\s+(\\S+)\\s+lookup\\s+(\\S+)\\s*$")
+            for _, line := range strings.Split(string(out), "\n") {
+                if groups := ruleRegex.FindStringSubmatch(line); groups != nil {
+                    from := groups[1]
+                    // `ip rule list table X` shows lookup table names not numbers
+                    tableName := groups[2]
+                    ipRuleFromLookups[from] = tableName
+                }
             }
         }
-    }
 
-    for _, from := range []string{
-        self.routingTable.ipv6.interfaceIp,
-    } {
-        if tableName, ok := ipv6RuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {
-            runAndLog(sudo(
-                "ip", "-6", "rule", "add",
-                "from", from,
-                "table", tableNumberStr,
-            ))
+        // lookup to the table for packets from these sources:
+        // - interface ip (sockets bound to the interface)
+        // - docker interface subnet (sockets in docker containers in the network)
+        for _, from := range []string{
+            networkConfig.routingTable.interfaceIp,
+            networkConfig.dockerNetwork.interfaceSubnet,
+        } {
+            if tableName, ok := ipRuleFromLookups[from]; !ok || tableName != self.routingTable.tableName {
+                runAndLog(sudo2(
+                    networkConfig.ipCommand, "rule", "add",
+                    "from", from,
+                    "table", tableNumberStr,
+                ))
+            }
         }
     }
 }
@@ -343,46 +321,41 @@ func (self *RunWorker) iptablesChainName() string {
     return chainName
 }
 
-func (self *RunWorker) initSys() {
-    cmd := sudo("sysctl", "-w", "net.ipv6.bindv6only=1")
-    if err := runAndLog(cmd); err != nil {
-        panic(err)
-    }
-}
-
 func (self *RunWorker) initBlockRedirect() {
     // ** important: restarting warpctl should not interrupt running services **
     // add rules if they do not already exists
 
     chainName := self.iptablesChainName()
 
-    // ignore errors
-    runAndLog(sudo(
-        "iptables", "-t", "nat", "-N", chainName,
-    ))
- 
-    chainCmd := func(op string, entryChainName string) *exec.Cmd {
-        cmd := sudo(
-            "iptables", "-t", "nat", op, entryChainName,
-            "-m", "addrtype", "--dst-type", "LOCAL",
-            "-j", chainName,
-        )
-        return cmd
-    }
-
-    // apply chain to external traffic to local
-    // do not add if already exists
-    if err := runAndLog(chainCmd("-C", "PREROUTING")); err != nil {
-        if err := runAndLog(chainCmd("-I", "PREROUTING")); err != nil {
-            panic(err)
+    for _, networkConfig := range self.getNetworkConfigs() {
+        // ignore errors
+        runAndLog(sudo2(
+            networkConfig.iptablesCommand, "-t", "nat", "-N", chainName,
+        ))
+     
+        chainCmd := func(op string, entryChainName string) *exec.Cmd {
+            cmd := sudo2(
+                networkConfig.iptablesCommand, "-t", "nat", op, entryChainName,
+                "-m", "addrtype", "--dst-type", "LOCAL",
+                "-j", chainName,
+            )
+            return cmd
         }
-    }
 
-    // apply chain to local traffic to local
-    // do not add if already exists
-    if err := runAndLog(chainCmd("-C", "OUTPUT")); err != nil {
-        if err := runAndLog(chainCmd("-I", "OUTPUT")); err != nil {
-            panic(err)
+        // apply chain to external traffic to local
+        // do not add if already exists
+        if err := runAndLog(chainCmd("-C", "PREROUTING")); err != nil {
+            if err := runAndLog(chainCmd("-I", "PREROUTING")); err != nil {
+                panic(err)
+            }
+        }
+
+        // apply chain to local traffic to local
+        // do not add if already exists
+        if err := runAndLog(chainCmd("-C", "OUTPUT")); err != nil {
+            if err := runAndLog(chainCmd("-I", "OUTPUT")); err != nil {
+                panic(err)
+            }
         }
     }
 }
@@ -438,7 +411,7 @@ func (self *RunWorker) deploy() error {
         }
     }
 
-    self.redirect(externalPortsToInternalPort)
+    self.redirect(externalPortsToInternalPort, servicePortsToInternalPort)
     success = true
     return nil
 }
@@ -510,19 +483,19 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
         "--restart=on-failure",
     }
     for servicePort, internalPort := range servicePortsToInternalPort {
-        // [::] listens to both ipv4 and ipv6
-        // the host must have `sysctl -w net.ipv6.bindv6only=1`
-        args = append(args, []string{"-p", fmt.Sprintf("[::]:%d:%d", internalPort, servicePort)}...)
+        // docker by default accepts connections on both IPv4 and IPv6
+        args = append(args, []string{"-p", fmt.Sprintf("%d:%d", internalPort, servicePort)}...)
     }
     if self.dockerNetwork != nil {
         args = append(args, []string{"--network", self.dockerNetwork.networkName}...)
     } else {
         args = append(args, []string{"--network", self.servicesDockerNetwork.networkName}...)
     }
+    // docker services run on ipv4 only
     if self.dockerNetwork != nil {
-        args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.dockerNetwork.networkName, self.dockerNetwork.interfaceIp)}...)
+        args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.dockerNetwork.networkName, self.dockerNetwork.ipv4.interfaceIp)}...)
     }
-    args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.servicesDockerNetwork.networkName, self.servicesDockerNetwork.interfaceIp)}...)
+    args = append(args, []string{"--add-host", fmt.Sprintf("%s:%s", self.servicesDockerNetwork.networkName, self.servicesDockerNetwork.ipv4.interfaceIp)}...)
 
     switch self.vaultMountMode {
     case MOUNT_MODE_YES:
@@ -707,60 +680,93 @@ func (self *RunWorker) pollBasicContainerStatus(servicePortsToInternalPort map[i
     panic("Could not poll container status.")
 }
 
-func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int) {
+func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, servicePortsToInternalPort map[int]int) {
     chainName := self.iptablesChainName()
 
-    redirectCmd := func(op string, externalPort int, internalPort int) *exec.Cmd {
-        return sudo(
-            "iptables", "-t", "nat", op, chainName,
-            "-p", "tcp", "-m", "tcp", "--dport", strconv.Itoa(externalPort),
-            "-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
-        )
-    }
-
-    for externalPort, internalPort := range externalPortsToInternalPort {
-        // do not add if already exists
-        if err := runAndLog(redirectCmd("-C", externalPort, internalPort)); err != nil {
-            if err := runAndLog(redirectCmd("-I", externalPort, internalPort)); err != nil {
-                panic(err)
-            }
+    for _, networkConfig := range self.getNetworkConfigs() {
+        redirectCmd := func(op string, externalPort int, internalPort int) *exec.Cmd {
+            return sudo2(
+                networkConfig.iptablesCommand, "-t", "nat", op, chainName,
+                "-p", "tcp", "-m", "tcp", "--dport", strconv.Itoa(externalPort),
+                "-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
+            )
         }
-    }
-
-    // find existing redirects and remove those for the owned external ports
-    existingExternalPortsToInternalPorts := map[int]map[int]bool{}
-    redirectRegex := regexp.MustCompile("^\\s*REDIRECT\\s+.*\\s+dpt:(\\d+)\\s+redir\\s+ports\\s+(\\d+)\\s*$")
-    if out, err := sudo("iptables", "-t", "nat", "-L", chainName, "-n").Output(); err == nil {
-        /*
-        Chain WARP-LOCAL-LB-ENS160 (2 references)
-        target     prot opt source               destination
-        REDIRECT   tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:443 redir ports 7231
-        REDIRECT   tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:80 redir ports 7201
-        */
-        for _, line := range strings.Split(string(out), "\n") {
-            if groups := redirectRegex.FindStringSubmatch(line); groups != nil {
-                externalPort, _ := strconv.Atoi(groups[1])
-                internalPort, _ := strconv.Atoi(groups[2])
-                internalPortsMap, ok := existingExternalPortsToInternalPorts[externalPort]
-                if !ok {
-                    internalPortsMap = map[int]bool{}
-                    existingExternalPortsToInternalPorts[externalPort] = internalPortsMap
+        for externalPort, internalPort := range externalPortsToInternalPort {
+            // do not add if already exists
+            if err := runAndLog(redirectCmd("-C", externalPort, internalPort)); err != nil {
+                if err := runAndLog(redirectCmd("-I", externalPort, internalPort)); err != nil {
+                    panic(err)
                 }
-                internalPortsMap[internalPort] = true
             }
         }
-    }
 
-    Err.Printf("Remove existing redirects %s\n", existingExternalPortsToInternalPorts)
+        // redirect for traffic to the interface ip on the service port
+        publicRedirectCmd := func(op string, servicePort int, internalPort int) *exec.Cmd {
+            return sudo2(
+                networkConfig.iptablesCommand, "-t", "nat", op, chainName,
+                "-p", "tcp", "-m", "tcp", "-d", networkConfig.routingTable.interfaceIp, "--dport", strconv.Itoa(servicePort),
+                "-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
+            )
+        }
+        for servicePort, internalPort := range servicePortsToInternalPort {
+            // do not add if already exists
+            if err := runAndLog(redirectCmd("-C", servicePort, internalPort)); err != nil {
+                if err := runAndLog(redirectCmd("-I", servicePort, internalPort)); err != nil {
+                    panic(err)
+                }
+            }
+        }
 
-    for externalPort, internalPort := range externalPortsToInternalPort {
-        if existingInternalPortsMap, ok := existingExternalPortsToInternalPorts[externalPort]; ok {
-            for existingInternalPort, _ := range existingInternalPortsMap {
-                if internalPort != existingInternalPort {
-                    for {
-                        cmd := redirectCmd("-D", externalPort, existingInternalPort)
-                        if err := runAndLog(cmd); err != nil {
-                            break
+        // find existing redirects and remove those for the owned external ports
+        existingPortsToInternalPorts := map[int]map[int]bool{}
+        redirectRegex := regexp.MustCompile("^\\s*REDIRECT\\s+.*\\s+dpt:(\\d+)\\s+redir\\s+ports\\s+(\\d+)\\s*$")
+        if out, err := sudo2(networkConfig.iptablesCommand, "-t", "nat", "-L", chainName, "-n").Output(); err == nil {
+            /*
+            Chain WARP-LOCAL-LB-ENS160 (2 references)
+            target     prot opt source               destination
+            REDIRECT   tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:443 redir ports 7231
+            REDIRECT   tcp  --  0.0.0.0/0            0.0.0.0/0            tcp dpt:80 redir ports 7201
+            */
+            for _, line := range strings.Split(string(out), "\n") {
+                if groups := redirectRegex.FindStringSubmatch(line); groups != nil {
+                    port, _ := strconv.Atoi(groups[1])
+                    internalPort, _ := strconv.Atoi(groups[2])
+                    internalPortsMap, ok := existingPortsToInternalPorts[port]
+                    if !ok {
+                        internalPortsMap = map[int]bool{}
+                        existingPortsToInternalPorts[port] = internalPortsMap
+                    }
+                    internalPortsMap[internalPort] = true
+                }
+            }
+        }
+
+        Err.Printf("Remove existing redirects %s\n", existingPortsToInternalPorts)
+
+        for externalPort, internalPort := range externalPortsToInternalPort {
+            if existingInternalPortsMap, ok := existingPortsToInternalPorts[externalPort]; ok {
+                for existingInternalPort, _ := range existingInternalPortsMap {
+                    if internalPort != existingInternalPort {
+                        for {
+                            cmd := redirectCmd("-D", externalPort, existingInternalPort)
+                            if err := runAndLog(cmd); err != nil {
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for servicePort, internalPort := range servicePortsToInternalPort {
+            if existingInternalPortsMap, ok := existingPortsToInternalPorts[servicePort]; ok {
+                for existingInternalPort, _ := range existingInternalPortsMap {
+                    if internalPort != existingInternalPort {
+                        for {
+                            cmd := publicRedirectCmd("-D", servicePort, existingInternalPort)
+                            if err := runAndLog(cmd); err != nil {
+                                break
+                            }
                         }
                     }
                 }
@@ -886,39 +892,62 @@ type NetworkInterface struct {
     interfaceGateway string
 }
 
+
+type NetworkConfig struct {
+    routingTable *NetworkInterface
+    dockerNetwork *NetworkInterface
+    ipCommand []string
+    iptablesCommand []string
+}
+
+func getNetworkConfigs(routingTable *RoutingTable, dockerNetwork *DockerNetwork) []*NetworkConfig {
+    networkConfigs := []*NetworkConfig{}
+    // ipv4 always present
+    networkConfigs = append(networkConfigs, &NetworkConfig{
+        routingTable: routingTable.ipv4,
+        dockerNetwork: dockerNetwork.ipv4,
+        ipCommand: []string{"ip"},
+        iptablesCommand: []string{"iptables"},
+    })
+    // ipv6 optional
+    if routingTable.ipv6 != nil && dockerNetwork.ipv6 != nil {
+        networkConfigs = append(networkConfigs, &NetworkConfig{
+            routingTable: routingTable.ipv6,
+            dockerNetwork: dockerNetwork.ipv6,
+            ipCommand: []string{"ip", "-6"},
+            iptablesCommand: []string{"ip6tables"},
+        })
+    }
+    return networkConfigs
+}
+
+
+
 // local docker is always ipv4
 type DockerNetwork struct {
     networkName string
-    NetworkInterface
+    ipv4 *NetworkInterface
+    ipv6 *NetworkInterface
 }
 
 func parseDockerNetwork(dockerNetworkStr string) *DockerNetwork {
-    // assume the network name is the interface name
-    interfaceName := dockerNetworkStr
+    // for docker the interface name is the network name
+    networkName := dockerNetworkStr
 
-    v4NetworkInterfaces, _, err := getNetworkInterfaces(interfaceName)
-    if err != nil {
-        panic(err)
-    }
-    if len(v4NetworkInterfaces) == 0 {
-        panic(errors.New(fmt.Sprintf("Could not find interface %s", interfaceName)))
-    }
-    if 1 < len(v4NetworkInterfaces) {
-        panic(errors.New(fmt.Sprintf("More than one network attached to interface %s", interfaceName)))
-    }
-    v4NetworkInterface := v4NetworkInterfaces[0]
+    v4NetworkInterface, v6NetworkInterface := requireNetworkInterfaceIpv4OptionalIpv6(networkName)
 
     return &DockerNetwork{
-        networkName: dockerNetworkStr,
-        NetworkInterface: *v4NetworkInterface,
+        networkName: networkName,
+        ipv4: v4NetworkInterface,
+        ipv6: v6NetworkInterface,
     }
 }
 
+
 type RoutingTable struct {
-    interfaceName string
     tableNumber int
     tableName string
-    ipv4 NetworkInterface
+    ipv4 *NetworkInterface
     ipv6 *NetworkInterface
 }
 
@@ -952,6 +981,20 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
         panic(fmt.Sprintf("Routing table %d does not exist.", tableNumber))
     }
 
+    v4NetworkInterface, v6NetworkInterface := requireNetworkInterfaceIpv4OptionalIpv6(interfaceName)
+
+    return &RoutingTable{
+        tableNumber: tableNumber,
+        tableName: tableName,
+        ipv4: v4NetworkInterface,
+        ipv6: v6NetworkInterface,
+    }
+}
+
+
+// one ipv4
+// zero or one ipv6
+func requireNetworkInterfaceIpv4OptionalIpv6(interfaceName string) (*NetworkInterface, *NetworkInterface) {
     v4NetworkInterfaces, v6NetworkInterfaces, err := getNetworkInterfaces(interfaceName)
     if err != nil {
         panic(err)
@@ -976,13 +1019,7 @@ func parseRoutingTable(routingTableStr string) *RoutingTable {
         v6NetworkInterface = v6NetworkInterfaces[0]
     }
 
-    return &RoutingTable{
-        interfaceName: interfaceName,
-        tableNumber: tableNumber,
-        tableName: tableName,
-        ipv4: *v4NetworkInterface,
-        ipv6: v6NetworkInterface,
-    }
+    return v4NetworkInterface, v6NetworkInterface
 }
 
 
@@ -1003,38 +1040,32 @@ func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, []*Network
     v6NetworkInterfaces := []*NetworkInterface{}
 
     for _, addr := range addrs {
-        if ipNet, ok := addr.(*net.IPNet); ok {
-            if ipNet.IP.To4() != nil {
-                zeroedIpNet := net.IPNet{
-                    IP: ipNet.IP.Mask(ipNet.Mask),
-                    Mask: ipNet.Mask,
-                }
+        ipNet, ok := addr.(*net.IPNet)
+        if !ok {
+            continue
+        }
+        if ipNet.IP.IsLoopback() || ipNet.IP.IsLinkLocalMulticast() || ipNet.IP.IsLinkLocalUnicast() {
+            continue
+        }
 
-                gateway := nextIp(zeroedIpNet, 1)
+        zeroedIpNet := net.IPNet{
+            IP: ipNet.IP.Mask(ipNet.Mask),
+            Mask: ipNet.Mask,
+        }
 
-                v4NetworkInterface := &NetworkInterface{
-                    interfaceName: interfaceName,
-                    interfaceIp: ipNet.IP.String(),
-                    interfaceSubnet: zeroedIpNet.String(),
-                    interfaceGateway: gateway.String(),
-                }
-                v4NetworkInterfaces = append(v4NetworkInterfaces, v4NetworkInterface)
-            } else if ipNet.IP.To16() != nil {
-                zeroedIpNet := net.IPNet{
-                    IP: ipNet.IP.Mask(ipNet.Mask),
-                    Mask: ipNet.Mask,
-                }
+        gateway := gateway(zeroedIpNet)
 
-                gateway := nextIp(zeroedIpNet, 1)
+        networkInterface := &NetworkInterface{
+            interfaceName: interfaceName,
+            interfaceIp: ipNet.IP.String(),
+            interfaceSubnet: zeroedIpNet.String(),
+            interfaceGateway: gateway.String(),
+        }
 
-                v6NetworkInterface := &NetworkInterface{
-                    interfaceName: interfaceName,
-                    interfaceIp: ipNet.IP.String(),
-                    interfaceSubnet: zeroedIpNet.String(),
-                    interfaceGateway: gateway.String(),
-                }
-                v6NetworkInterfaces = append(v6NetworkInterfaces, v6NetworkInterface)
-            }
+        if ipNet.IP.To4() != nil {
+            v4NetworkInterfaces = append(v4NetworkInterfaces, networkInterface)
+        } else if ipNet.IP.To16() != nil {
+            v6NetworkInterfaces = append(v6NetworkInterfaces, networkInterface)
         }
     }
 

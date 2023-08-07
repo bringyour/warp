@@ -7,6 +7,7 @@ import (
     "errors"
     "strings"
     "sort"
+    "crypto/sha256"
 
     "golang.org/x/exp/maps"
     "golang.org/x/exp/slices"
@@ -94,6 +95,7 @@ type LbConfig struct {
 type ServiceConfig struct {
     CorsOrigins []string `yaml:"cors_origins,omitempty"`
     Status string `yaml:"status,omitempty"`
+    HiddenPrefixes []string `yaml:"hidden_prefixes,omitempty"`
     ExposeAliases []string `yaml:"expose_aliases,omitempty"`
     Exposed *bool `yaml:"exposed,omitempty"`
     LbExposed *bool `yaml:"lb_exposed,omitempty"`
@@ -127,6 +129,18 @@ func (self *ServiceConfig) isLbExposed() bool {
 
 func (self *ServiceConfig) includesHost(host string) bool {
     return len(self.Hosts) == 0 || slices.Contains(self.Hosts, host)
+}
+
+func (self *ServiceConfig) getHiddenPrefix() string {
+    prefixes := self.getHiddenPrefixes()
+    if 0 < len(prefixes) {
+        return prefixes[0]
+    }
+    return ""
+}
+
+func (self *ServiceConfig) getHiddenPrefixes() []string {
+    return self.HiddenPrefixes
 }
 
 
@@ -479,11 +493,20 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
             panic(err)
         }
 
+        // iteration for port assignment must have a stable order
+        // when iterating map keys always sort the keys and iterate the sorted keys
+
         lbConfig := serviceConfigVersion.Lb
         // process forced external ports first
         for _, includeForcedExternalPorts := range []bool{true, false} {
-            for host, lbBlocks := range lbConfig.Interfaces {
-                for interfaceName, lbBlock := range lbBlocks {
+            orderedHosts := maps.Keys(lbConfig.Interfaces)
+            sort.Strings(orderedHosts)
+            for _, host := range orderedHosts {
+                lbBlocks := lbConfig.Interfaces[host]
+                orderedInterfaceNames := maps.Keys(lbBlocks)
+                sort.Strings(orderedInterfaceNames)
+                for _, interfaceName := range orderedInterfaceNames {
+                    lbBlock := lbBlocks[interfaceName]
                     hasForcedExternalPorts := 0 < len(lbBlock.ExternalPorts)
                     if hasForcedExternalPorts != includeForcedExternalPorts {
                         continue
@@ -531,7 +554,10 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
             }
         }
 
-        for service, serviceConfig := range serviceConfigVersion.Services {
+        orderedServices := maps.Keys(serviceConfigVersion.Services)
+        sort.Strings(orderedServices)
+        for _, service := range orderedServices {
+            serviceConfig := serviceConfigVersion.Services[service]
             for _, blockWeights := range serviceConfig.Blocks {
                 for block, _ := range blockWeights {
                     for portType, ports := range serviceConfig.AllPorts() {
@@ -918,6 +944,7 @@ func (self *NginxConfig) addNginxConfig() {
         self.block("server", func() {
             self.raw(`
             listen 80 default_server;
+            listen [::]:80 default_server;
             server_name _;
             `)
 
@@ -938,6 +965,7 @@ func (self *NginxConfig) addNginxConfig() {
 }
 
 func (self *NginxConfig) addUpstreamBlocks() {
+    Out.Printf("PORT BLOCKS %s\n", self.portBlocks)
     // service-block-<service>
     // service-block-<service>-<block>
     for _, service := range self.services() {
@@ -1027,6 +1055,7 @@ func (self *NginxConfig) addLbBlock() {
     self.block("server", func() {
         self.raw(`
         listen 80;
+        listen [::]:80;
         server_name {{.lbHostList}};
         `, map[string]any{
             "lbHostList": strings.Join(lbHosts, " "),
@@ -1044,7 +1073,7 @@ func (self *NginxConfig) addLbBlock() {
             self.block(statusLocation, func() {
                 self.raw(`
                 alias /srv/warp/status/status.json;
-                add_header Content-Type application/json;
+                add_header 'Content-Type' 'application/json';
                 `)
             })
         }
@@ -1059,6 +1088,7 @@ func (self *NginxConfig) addLbBlock() {
     self.block("server", func() {
         self.raw(`
         listen 443 ssl;
+        listen [::]:443 ssl;
         server_name {{.lbHostList}};
         ssl_certificate     /srv/warp/vault/{{.relativeTlsPemPath}};
         ssl_certificate_key /srv/warp/vault/{{.relativeTlsKeyPath}};
@@ -1079,7 +1109,7 @@ func (self *NginxConfig) addLbBlock() {
             self.block(statusLocation, func() {
                 self.raw(`
                 alias /srv/warp/status/status.json;
-                add_header Content-Type application/json;
+                add_header 'Content-Type' 'application/json';
                 `)
             })
         }
@@ -1168,6 +1198,7 @@ func (self *NginxConfig) addServiceBlocks() {
         self.block("server", func() {
             self.raw(`
             listen 80;
+            listen [::]:80;
             server_name {{.serviceHostList}};
             return 301 https://$host$request_uri;
             `, map[string]any{
@@ -1178,6 +1209,7 @@ func (self *NginxConfig) addServiceBlocks() {
         self.block("server", func() {
             self.raw(`
             listen 443 ssl;
+            listen [::]:443 ssl;
             server_name {{.serviceHostList}};
             ssl_certificate     /srv/warp/vault/{{.relativeTlsPemPath}};
             ssl_certificate_key /srv/warp/vault/{{.relativeTlsKeyPath}};
@@ -1187,7 +1219,7 @@ func (self *NginxConfig) addServiceBlocks() {
                 "relativeTlsKeyPath": self.relativeTlsKeyPath,
             })
 
-            for _, routePrefix := range self.getRoutePrefixes() {
+            for _, routePrefix := range self.getRoutePrefixes(service) {
                 if serviceConfig.isStandardStatus() {
                     statusLocation := templateString(
                         "location ={{.routePrefix}}/status",
@@ -1277,9 +1309,13 @@ func (self *NginxConfig) getLbRoutePrefixes() []string {
     return routePrefixes
 }
 
-func (self *NginxConfig) getRoutePrefixes() []string {
+func (self *NginxConfig) getRoutePrefixes(service string) []string {
     routePrefixes := []string{}
     for _, prefix := range self.servicesConfig.getHiddenPrefixes() {
+        routePrefix := fmt.Sprintf("/%s", prefix)
+        routePrefixes = append(routePrefixes, routePrefix)
+    }
+    for _, prefix := range self.servicesConfig.Versions[0].Services[service].getHiddenPrefixes() {
         routePrefix := fmt.Sprintf("/%s", prefix)
         routePrefixes = append(routePrefixes, routePrefix)
     }
@@ -1374,9 +1410,12 @@ func (self *SystemdUnits) generateForHost(host string) map[string]map[string]*Un
         }...)
 
         if portBlocks, ok := self.portBlocks["lb"][block]; ok {
-            // add port block strs
+            // add port block strs in ascending port order
+            orderedPorts := maps.Keys(portBlocks)
+            sort.Ints(orderedPorts)
             portBlockParts := []string{}
-            for _, portBlock := range portBlocks {
+            for _, port := range orderedPorts {
+                portBlock := portBlocks[port]
                 portBlockPart := fmt.Sprintf(
                     "%d:%d:%s",
                     portBlock.port,
@@ -1594,7 +1633,7 @@ func (self *SystemdUnits) drainUnit(service string, block string, cmdArgs []stri
 func getDockerNetworkCommands(env string) map[string][][]string {
     /*
     # LB block network
-    docker network create --attachable --opt 'com.docker.network.bridge.name=warp1' --opt 'com.docker.network.bridge.enable_ip_masquerade=false' warp1 
+    docker network create --attachable --opt 'com.docker.network.bridge.name=warp1' --opt 'com.docker.network.bridge.enable_ip_masquerade=false' warp1 --ipv6 --subnet fd00:X::/64
     # services network
     docker network create --attachable --opt 'com.docker.network.bridge.name=warpsservices' warpsservices
     */
@@ -1618,12 +1657,20 @@ func getDockerNetworkCommands(env string) map[string][][]string {
 
         for _, lbBlock := range lbBlocks {
             // block network
+
+            // the ipv6 subnet is a hash of the docker network
+            h := sha256.New()
+            h.Write([]byte(lbBlock.DockerNetwork))
+            b := h.Sum(nil)
+            ipv6Subnet := fmt.Sprintf("fd00:%x:%x:%x::/64", b[0:2], b[2:4], b[4:6])
+
             blockNetworkCommand := []string{
                 "docker", "network", "create", "--attachable",
                 // interface name should be equal to the network name
                 "--opt", fmt.Sprintf("com.docker.network.bridge.name=%s", lbBlock.DockerNetwork),
                 // disable masquerade (snat) to preserve the source ip
                 "--opt", "com.docker.network.bridge.enable_ip_masquerade=false",
+                "--ipv6", "--subnet", ipv6Subnet,
                 lbBlock.DockerNetwork,
             }
             networkCommands = append(networkCommands, blockNetworkCommand)

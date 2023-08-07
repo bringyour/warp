@@ -12,6 +12,11 @@ build:
 	# build the units for reference
 	mkdir -p build/${WARP_ENV}/systemd
 	warpctl service create-units ${WARP_ENV} --out=build/${WARP_ENV}/systemd;
+	# version the build for reference so that we can track changes
+	if [[ -e ../../xops/lb ]]; then\
+		rm -rf ../../xops/lb/${WARP_ENV};\
+		cp -r build/${WARP_ENV} ../../xops/lb/${WARP_ENV};\
+	fi
 
 image:
 	# --no-cache to always regenerate the encryption data

@@ -226,6 +226,13 @@ warpctl init --docker_namespace=<docker_namespace> --dockerhub_username=<dockerh
 
 Now copy the systemd units for the host into place (e.g. `/etc/system/system.d/`) and enable all the units.
 
+```
+for s in `find /etc/systemd/system -iname 'warp-*.service' | xargs -n 1 basename`; do
+    sudo systemctl enable $s;
+    sudo systemctl restart $s;
+done
+```
+
 
 ## Build and deploy
 

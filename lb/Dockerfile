@@ -32,11 +32,14 @@ RUN nginx -V
 
 RUN openssl dhparam -dsaparam -out /etc/nginx/dhparam.pem 4096
 
+COPY nginx/mime.types /etc/nginx/mime.types
+ADD build/${WARP_ENV}/nginx.conf /srv/warp/nginx.conf
+
 COPY build/${WARP_ENV}/status.json /srv/warp/status/status.json
 
-ADD build/${WARP_ENV}/nginx.conf /srv/warp/nginx.conf
 EXPOSE 80
 EXPOSE 443
+
 # see https://ubuntu.com/blog/avoiding-dropped-connections-in-nginx-containers-with-stopsignal-sigquit
 STOPSIGNAL SIGQUIT
 # this expects container args to be the path to the config, e.g. "/srv/warp/nginx.conf/${WARP_BLOCK}.conf"

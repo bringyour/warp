@@ -7,7 +7,7 @@ import (
     "os"
     "io"
     // "os/exec"
-    "path"
+    "path/filepath"
     "encoding/json"
     "time"
     // "strings"
@@ -87,40 +87,45 @@ func (self *WarpSettings) RequireDockerHubToken() string {
     return *self.DockerHubToken
 }
 
-func (self *WarpSettings) RequireVaultHome() string {
-    if self.VaultHome == nil {
-        warpHome := os.Getenv("WARP_HOME")
-        if warpHome == "" {
-            panic("WARP_VAULT_HOME is not set. Use warpctl init.")
-        } else {
-            return path.Join(warpHome, "vault")
-        }
+func (self *WarpSettings) RequireWarpHome() string {
+    warpHome := os.Getenv("WARP_HOME")
+    if warpHome != "" {
+        return warpHome
     }
-    return *self.VaultHome
+    panic("WARP_HOME is not set. Use warpctl init.")
+}
+
+func (self *WarpSettings) RequireVaultHome() string {
+    if self.VaultHome != nil {
+        return *self.VaultHome
+    }
+    warpVaultHome := os.Getenv("WARP_VAULT_HOME")
+    if warpVaultHome != "" {
+        return warpVaultHome
+    }
+    return filepath.Join(self.RequireWarpHome(), "vault")
 }
 
 func (self *WarpSettings) RequireConfigHome() string {
-    if self.ConfigHome == nil {
-        warpHome := os.Getenv("WARP_HOME")
-        if warpHome == "" {
-            panic("WARP_CONFIG_HOME is not set. Use warpctl init.")
-        } else {
-            return path.Join(warpHome, "config")
-        }
+    if self.ConfigHome != nil {
+        return *self.ConfigHome
     }
-    return *self.ConfigHome
+    warpConfigHome := os.Getenv("WARP_CONFIG_HOME")
+    if warpConfigHome != "" {
+        return warpConfigHome
+    }
+    return filepath.Join(self.RequireWarpHome(), "config")
 }
 
 func (self *WarpSettings) RequireSiteHome() string {
-    if self.ConfigHome == nil {
-        warpHome := os.Getenv("WARP_HOME")
-        if warpHome == "" {
-            panic("WARP_SITE_HOME is not set. Use warpctl init.")
-        } else {
-            return path.Join(warpHome, "site")
-        }
+    if self.SiteHome != nil {
+        return *self.SiteHome
     }
-    return *self.SiteHome
+    warpSiteHome := os.Getenv("WARP_SITE_HOME")
+    if warpSiteHome != "" {
+        return warpSiteHome
+    }
+    return filepath.Join(self.RequireWarpHome(), "site")
 }
 
 
@@ -142,7 +147,7 @@ func getWarpState() *WarpState {
     var err error
 
     var warpSettings WarpSettings
-    warpJson, err := os.ReadFile(path.Join(warpHome, "warp.json"))
+    warpJson, err := os.ReadFile(filepath.Join(warpHome, "warp.json"))
     if err == nil {
         err = json.Unmarshal(warpJson, &warpSettings)
         if err != nil {
@@ -151,7 +156,7 @@ func getWarpState() *WarpState {
     }
 
     var versionSettings VersionSettings
-    versionJson, err := os.ReadFile(path.Join(warpVersionHome, "version.json"))
+    versionJson, err := os.ReadFile(filepath.Join(warpVersionHome, "version.json"))
     if err == nil {
         err = json.Unmarshal(versionJson, &versionSettings)
         if err != nil {
@@ -184,7 +189,7 @@ func setWarpState(state *WarpState) {
     if err != nil {
         panic(err)
     }
-    err = os.WriteFile(path.Join(warpHome, "warp.json"), warpJson, os.FileMode(0770))
+    err = os.WriteFile(filepath.Join(warpHome, "warp.json"), warpJson, os.FileMode(0770))
     if err != nil {
         panic(err)
     }
@@ -193,7 +198,7 @@ func setWarpState(state *WarpState) {
     if err != nil {
         panic(err)
     }
-    err = os.WriteFile(path.Join(warpVersionHome, "version.json"), versionJson, os.FileMode(0770))
+    err = os.WriteFile(filepath.Join(warpVersionHome, "version.json"), versionJson, os.FileMode(0770))
     if err != nil {
         panic(err)
     }
@@ -352,7 +357,7 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
         url = *dockerHubReposResponse.NextUrl
     }
 
-    fmt.Printf("Found repo names %s\n", strings.Join(repoNames, ", "))
+    Err.Printf("Found repo names %s\n", strings.Join(repoNames, ", "))
 
     envVersionMetas := map[string]map[string]*VersionMeta{}
 
@@ -502,24 +507,24 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
         semverSortWithBuild(configVersions)
 
         if 0 < len(statusVersions.errors) {
-            fmt.Printf("** errors **:\n")
+            Err.Printf("** errors **:\n")
             for errorMessage, count := range statusVersions.errors {
-                fmt.Printf("    %s: %d\n", errorMessage, count)
+                Err.Printf("    %s: %d\n", errorMessage, count)
             }
         }
 
-        fmt.Printf("%s versions:\n", service)
+        Err.Printf("%s versions:\n", service)
         for _, version := range serviceVersions {
             count := statusVersions.versions[version]
             percent := 100.0 * count / serviceCount
-            fmt.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
+            Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
-        fmt.Printf("config versions:\n")
+        Err.Printf("config versions:\n")
         for _, version := range configVersions {
             count := statusVersions.configVersions[version]
             percent := 100.0 * count / configCount
-            fmt.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
+            Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
         if targetVersion == "" {
@@ -531,7 +536,7 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
             break
         }
 
-        fmt.Printf("\n")
+        Err.Printf("\n")
 
         time.Sleep(10 * time.Second)
     }

@@ -4,7 +4,7 @@ import (
     "fmt"
     "os"
     "os/exec"
-    "path"
+    "path/filepath"
     // "encoding/json"
     "time"
     "strings"
@@ -31,7 +31,7 @@ var Out *log.Logger
 var Err *log.Logger
 
 func init() {
-    Out = log.New(os.Stdout, "", log.Ldate | log.Ltime | log.Lshortfile)
+    Out = log.New(os.Stdout, "", 0)
     Err = log.New(os.Stderr, "", log.Ldate | log.Ltime | log.Lshortfile)
 }
 
@@ -322,25 +322,35 @@ func build(opts docopt.Opts) {
     env, _ := opts.String("<env>")
 
     makefile, _ := opts.String("<Makefile>")
-    makefileName := path.Base(makefile)
-    makfileDirPath := path.Dir(makefile)
+    absMakefile, _ := filepath.Abs(makefile)
+
+    if info, err := os.Stat(absMakefile); errors.Is(err, os.ErrNotExist) || !info.Mode().IsRegular() {
+        panic(fmt.Sprintf("Makefile does not exist (%s)", absMakefile))
+    }
+
+    makefileName := filepath.Base(absMakefile)
+    makfileDirPath := filepath.Dir(absMakefile)
     // the dir name is the service name
-    service := path.Base(makfileDirPath)
+    service := filepath.Base(makfileDirPath)
 
     if makefileName != "Makefile" {
         panic("Makefile must point to file named Makefile")
     }
 
     state := getWarpState()
-    version := state.getVersion(true, true)
+    version := state.getVersion(true, false)
+    dockerVersion := convertVersionToDocker(version)
 
     envVars := map[string]string{
         "WARP_VAULT_HOME": state.warpSettings.RequireVaultHome(),
         "WARP_CONFIG_HOME": state.warpSettings.RequireConfigHome(),
         "WARP_SITE_HOME": state.warpSettings.RequireSiteHome(),
-        "WARP_DOCKER_NAMESPACE": state.warpSettings.RequireDockerNamespace(),
         "WARP_VERSION": version,
         "WARP_ENV": env,
+        "WARP_SERVICE": service,
+        "WARP_DOCKER_NAMESPACE": state.warpSettings.RequireDockerNamespace(),
+        "WARP_DOCKER_IMAGE": fmt.Sprintf("%s-%s", env, service),
+        "WARP_DOCKER_VERSION": dockerVersion,
     }
 
     makeCommand := exec.Command("make")
@@ -839,7 +849,7 @@ func lbCreateConfig(opts docopt.Opts) {
             // <dir>/<block>.conf
             unitFileName := fmt.Sprintf("%s.conf", block)
             err := os.WriteFile(
-                path.Join(outDir, unitFileName),
+                filepath.Join(outDir, unitFileName),
                 []byte(config),
                 0644,
             )
@@ -875,6 +885,12 @@ func serviceRun(opts docopt.Opts) {
     var portBlocks *PortBlocks
     if portBlocksStr, err := opts.String("--portblocks"); err == nil {
         portBlocks = parsePortBlocks(portBlocksStr)
+    } else {
+        // no service ports
+        portBlocks = &PortBlocks{
+            externalsToInternals: map[int][]int{},
+            externalsToService: map[int]int{},
+        }
     }
     
     servicesDockerNetStr, _ := opts.String("--services_dockernet")
@@ -1046,7 +1062,7 @@ func createUnits(opts docopt.Opts) {
     if path, err := opts.String("--target_warpctl"); err == nil {
         targetWarpctl = path
     } else {
-        targetWarpctl = "/usr/local/bin/warpctl"
+        targetWarpctl = "/usr/local/sbin/warpctl"
     }
 
     var outDir string
@@ -1081,11 +1097,11 @@ func createUnits(opts docopt.Opts) {
         } else {
             // write to file
             // <dir>/<host>/warp-<env>-<service>-<shortBlock>.service
-            hostDir := path.Join(outDir, host)
+            hostDir := filepath.Join(outDir, host)
             os.MkdirAll(hostDir, 0755)
             unitFileName := fmt.Sprintf("warp-%s-%s-%s.service", env, service, units.shortBlock)
             err := os.WriteFile(
-                path.Join(hostDir, unitFileName),
+                filepath.Join(hostDir, unitFileName),
                 []byte(units.serviceUnit),
                 0644,
             )

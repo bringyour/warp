@@ -199,10 +199,20 @@ On the target server host, create the target WARP_HOME.
   site
 ```
 
-Also make sure the log dir exists.
+Create the docker networks and init the routing tables.
+
+```
+# execute the commands printed here
+warpctl service docker-networks <env>
+# append the config printed here to the bottom of /etc/iproute2/rt_tables
+warpctl service routing-tables <env>
+```
+
+Also make sure the log dir exists and that docker is logged in.
 
 ```
 mkdir /var/log/warp
+sudo docker login
 ```
 
 Configure vault and site outside of warp (e.g. Ansible or some secure system image tool). We will deploy the config as the final step.
@@ -215,6 +225,13 @@ warpctl init --docker_namespace=<docker_namespace> --dockerhub_username=<dockerh
 ```
 
 Now copy the systemd units for the host into place (e.g. `/etc/system/system.d/`) and enable all the units.
+
+```
+for s in `find /etc/systemd/system -iname 'warp-*.service' | xargs -n 1 basename`; do
+    sudo systemctl enable $s;
+    sudo systemctl restart $s;
+done
+```
 
 
 ## Build and deploy

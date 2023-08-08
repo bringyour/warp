@@ -10,14 +10,14 @@ build:
 	env GOOS=darwin GOARCH=arm64 go build -o build/darwin/arm64/
 	env GOOS=darwin GOARCH=amd64 go build -o build/darwin/amd64/
 
-	mkdir -p build/${WARP_ENV}/config/${WARP_VERSION}
+	mkdir -p build/${WARP_ENV}/config
 	cp -r ${WARP_CONFIG_HOME}/${WARP_ENV} build/${WARP_ENV}/config/${WARP_VERSION}
 
 image:
 	docker buildx build --progress=plain \
 		--build-arg warp_env=${WARP_ENV} \
 		--platform linux/arm64/v8,linux/amd64 \
-		-t ${WARP_NAMESPACE}/${WARP_ENV}-config-updater:${WARP_VERSION} \
+		-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION} \
 		--no-cache \
 		--push \
 		.

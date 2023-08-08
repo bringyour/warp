@@ -12,11 +12,6 @@ import (
     "regexp"
     "net"
     "runtime"
-    "sync"
-    "time"
-    "os"
-    "os/signal"
-    "syscall"
 
     "golang.org/x/exp/slices"
 
@@ -111,6 +106,14 @@ func outAndLog(cmd *exec.Cmd) ([]byte, error) {
 func sudo(name string, args ...string) *exec.Cmd {
     flatArgs := []string{}
     flatArgs = append(flatArgs, name)
+    flatArgs = append(flatArgs, args...)
+    return exec.Command("sudo", flatArgs...)
+}
+
+
+func sudo2(name []string, args ...string) *exec.Cmd {
+    flatArgs := []string{}
+    flatArgs = append(flatArgs, name...)
     flatArgs = append(flatArgs, args...)
     return exec.Command("sudo", flatArgs...)
 }
@@ -259,13 +262,13 @@ func indentAndTrimString(text string, indent int) string {
 
 
 
-func nextIp(ipNet net.IPNet, count int) net.IP {
+func nextIpv4(ipNet net.IPNet, count int) net.IP {
     ip := ipNet.IP.Mask(ipNet.Mask)
     ones, _ := ipNet.Mask.Size()
     i := ones / 8
 
-    for k := 0; k < count; k += i {
-        ip[i] += 0x01 >> (ones % 8)
+    for k := 0; k < count; k += 1 {
+        ip[i] += 0x01 << (ones % 8)
         // propagate the overflow bit forward
         for j := i; ip[j] == 0 && j + 1 < len(ip); j += 1 {
             ip[j + 1] += 0x01
@@ -275,6 +278,36 @@ func nextIp(ipNet net.IPNet, count int) net.IP {
     return ip
 }
 
+
+func nextIpv6(ipNet net.IPNet, count int) net.IP {
+    ip := ipNet.IP.Mask(ipNet.Mask)
+    ones, _ := ipNet.Mask.Size()
+    i := (ones / 16) * 2
+
+    for k := 0; k < count; k += 1 {
+        f := (uint16(ip[i]) << 8) | uint16(ip[i + 1])
+        f += 0x01 << (ones % 16)
+        ip[i] = byte(f >> 8)
+        ip[i + 1] = byte(f)
+        // propagate the overflow bit forward
+        for j := i; ip[j] == 0 && ip[j + 1] == 0 && j + 3 < len(ip); j += 2 {
+            ip[j + 1] += 0x01
+            f = (uint16(ip[j + 2]) << 8) | uint16(ip[j + 3])
+            f += 1
+            ip[j + 2] = byte(f >> 8)
+            ip[i + 3] = byte(f)
+        }
+    }
+
+    return ip
+}
+
+
+func gateway(ipNet net.IPNet) net.IP {
+    ip := ipNet.IP.Mask(ipNet.Mask)
+    ip[len(ip)-1] |= 0x01
+    return ip
+}
 
 
 func semverSortWithBuild(versions []*semver.Version) {
@@ -314,65 +347,6 @@ func mapStr[KT comparable, VT any](m map[KT]VT) string {
 
 
 
-type Event struct {
-    mutex sync.Mutex
-    value bool
-    interrupt chan bool
-}
-
-func NewEvent() *Event {
-    return &Event{
-        interrupt: make(chan bool, 0),
-    }
-}
-
-func (self *Event) Set() {
-    self.mutex.Lock()
-    defer self.mutex.Unlock()
-    self.value = true
-    close(self.interrupt)
-}
-
-func (self *Event) IsSet() bool {
-    self.mutex.Lock()
-    defer self.mutex.Unlock()
-    return self.value
-}
-
-func (self *Event) WaitForSet(timeout time.Duration) bool {
-    if !self.IsSet() {
-        select {
-        case <- self.interrupt:
-        case <- time.After(timeout):
-        }
-    }
-    return self.IsSet()
-}
-
-func (self *Event) SetOnSignals(signalValues ...syscall.Signal) func() {
-    stopSignal := make(chan os.Signal, 2)
-    for _, signalValue := range signalValues {
-        signal.Notify(stopSignal, signalValue)
-    }
-    go func() {
-        signalWatcher:
-        for {
-            select {
-            case sig, ok := <- stopSignal:
-                if ok {
-                    Err.Printf("Stop signal detected (%d).\n", sig)
-                    self.Set()
-                } else {
-                    break signalWatcher
-                }
-            }
-        }
-    }()
-    return func(){
-        signal.Stop(stopSignal)
-        close(stopSignal)
-    }
-}
 
 
 

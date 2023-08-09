@@ -430,7 +430,7 @@ func deploy(opts docopt.Opts) {
         }
         Err.Printf("All versions: %s\n", strings.Join(versionStrs, ", "))
 
-        filteredVersions := []*semver.Version{}
+        filteredVersions := []semver.Version{}
 
         if latestLocal, _ := opts.Bool("latest-local"); latestLocal {
             // keep only versions with pre release of this hostname
@@ -603,7 +603,7 @@ func lsServices(opts docopt.Opts) {
                     versionsSummary = "no deployed blocks"
                 } else {
                     count := 0
-                    versionCounts := map[*semver.Version]int{}
+                    versionCounts := map[semver.Version]int{}
                     for _, version := range versionMeta.latestBlocks {
                         count += 1
                         versionCounts[version] += 1
@@ -711,10 +711,10 @@ func lsVersions(opts docopt.Opts) {
 
                 semverSortWithBuild(versionMeta.versions)
 
-                baseVersionsMap := map[*semver.Version][]*semver.Version{}
+                baseVersionsMap := map[semver.Version][]semver.Version{}
                 for _, version := range versionMeta.versions {
                     baseVersion := semver.New(fmt.Sprintf("%d.%d.0-%s", version.Major, version.Minor, version.PreRelease))
-                    baseVersionsMap[baseVersion] = append(baseVersionsMap[baseVersion], version)
+                    baseVersionsMap[*baseVersion] = append(baseVersionsMap[*baseVersion], version)
                 }
                 baseVersions := maps.Keys(baseVersionsMap)
                 semverSortWithBuild(baseVersions)
@@ -724,13 +724,13 @@ func lsVersions(opts docopt.Opts) {
                     patchParts := []string{}
                     for i := 0; i < len(versions); {
                         j := i + 1
-                        for ; j < len(versions); j += 1 {
-                            if versions[j - 1].Patch  != versions[j].Patch - 1 {
-                                break
-                            }
+                        for ; j < len(versions) && (
+                                // multiple builds with the same patch
+                                versions[j - 1].Patch == versions[j].Patch ||
+                                versions[j - 1].Patch + 1 == versions[j].Patch); j += 1 {
                         }
                         var patchPart string
-                        if i == j - 1 {
+                        if versions[i].Patch == versions[j - 1].Patch {
                             // single
                             patchPart = fmt.Sprintf("%d", versions[i].Patch)
                         } else {

@@ -757,12 +757,12 @@ func findLatestTls(env string, domain string, wildcard bool) (relativeTlsPemPath
         }
 
         if entries, err := os.ReadDir(filepath.Join(home, "tls")); err == nil {
-            versionDirNames := map[*semver.Version]string{}
+            versionDirNames := map[semver.Version]string{}
             for _, entry := range entries {
                 if entry.IsDir() {
                     if version, err := semver.NewVersion(entry.Name()); err == nil {
                         if hasTlsFiles(filepath.Join(home, "tls", entry.Name())) {
-                            versionDirNames[version] = entry.Name()
+                            versionDirNames[*version] = entry.Name()
                         }
                     }
                 }

@@ -149,28 +149,32 @@ func (self *RunWorker) Run() {
 // service version, config version
 func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latestConfigVersion *semver.Version) {
     versionMeta := self.dockerHubClient.getVersionMeta(self.env, self.service)
-    latestVersion = versionMeta.latestBlocks[self.block]
+    if version, ok := versionMeta.latestBlocks[self.block]; ok {
+        latestVersion = &version
+    } else {
+        latestVersion = nil
+    }
 
     entries, err := os.ReadDir(self.warpState.warpSettings.RequireConfigHome())
     if err != nil {
         panic(err)
     }
 
-    configVersions := []*semver.Version{}
+    configVersions := []semver.Version{}
     for _, entry := range entries {
         Err.Printf("TEST CONFIG ENTRY %s\n", entry.Name())
         if entry.IsDir() {
             if version, err := semver.NewVersion(entry.Name()); err == nil {
-                configVersions = append(configVersions, version)
+                configVersions = append(configVersions, *version)
             }
         }
     }
     semverSortWithBuild(configVersions)
     
-    if len(configVersions) == 0 {
-        latestConfigVersion = nil
+    if 0 < len(configVersions) {
+        latestConfigVersion = &configVersions[len(configVersions) - 1]
     } else {
-        latestConfigVersion = configVersions[len(configVersions) - 1]
+        latestConfigVersion = nil
     }
 
     return
@@ -380,7 +384,7 @@ func (self *RunWorker) deploy() error {
     }
     success := false
     defer func() {
-        if !success {
+        if !success && deployedContainerId != "" {
             go NewKillWorker(deployedContainerId).Run()
         }
     }()
@@ -600,11 +604,12 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
     runCmd := docker("run", args...)
 
     out, err := outAndLog(runCmd)
-    if err != nil {
-        return "", err
-    }
     // `docker run` prints the container_id as the only output
     containerId := strings.TrimSpace(string(out))
+
+    if err != nil {
+        return containerId, err
+    }
 
     if self.dockerNetwork != nil {
         // connect to the services network

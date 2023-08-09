@@ -310,12 +310,12 @@ func gateway(ipNet net.IPNet) net.IP {
 }
 
 
-func semverSortWithBuild(versions []*semver.Version) {
-    slices.SortStableFunc(versions, func(a *semver.Version, b *semver.Version)(bool) {
-        if a.LessThan(*b) {
+func semverSortWithBuild(versions []semver.Version) {
+    slices.SortStableFunc(versions, func(a semver.Version, b semver.Version)(bool) {
+        if a.LessThan(b) {
             return true
         }
-        if a.Equal(*b) {
+        if a.Equal(b) {
             if a.Metadata < b.Metadata {
                 return true
             }
@@ -323,7 +323,6 @@ func semverSortWithBuild(versions []*semver.Version) {
         return false
     })
 }
-
 
 
 func mapStr[KT comparable, VT any](m map[KT]VT) string {

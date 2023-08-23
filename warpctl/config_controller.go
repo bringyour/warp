@@ -1076,6 +1076,37 @@ func (self *NginxConfig) addLbBlock() {
                 add_header 'Content-Type' 'application/json';
                 `)
             })
+
+            // expose each block status via http so that an exact ip-service-block can be monitored
+            for _, service := range self.services() {
+                blocks := maps.Keys(self.portBlocks[service])
+                sort.Strings(blocks)
+
+                serviceHost := fmt.Sprintf("%s-%s.%s", self.env, service, self.servicesConfig.Domain)
+
+                for _, block := range blocks {
+                    blockLocation := templateString(
+                        `location ={{.routePrefix}}/by/b/{{.service}}/{{.block}}/status`,
+                        map[string]any{
+                            "routePrefix": routePrefix,
+                            "service": service,
+                            "block": block,
+                        },
+                    )
+
+                    self.block(blockLocation, func() {
+                        self.raw(`
+                        proxy_pass http://service-block-{{.service}}-{{.block}}/status;
+                        proxy_set_header X-Forwarded-For $remote_addr;
+                        proxy_set_header Host {{.serviceHost}};
+                        `, map[string]any{
+                            "service": service,
+                            "block": block,
+                            "serviceHost": serviceHost,
+                        })
+                    })
+                }
+            }
         }
 
         self.block("location /", func() {

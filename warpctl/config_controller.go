@@ -158,8 +158,8 @@ func (self *LbBlock) getRateLimit() *RateLimit {
     }
     // rate defaults
     return &RateLimit{
-        RequestsPerSecond: 5,
-        Burst: 50,
+        RequestsPerSecond: 50,
+        Burst: 100,
         Delay: 25,
     }
 }

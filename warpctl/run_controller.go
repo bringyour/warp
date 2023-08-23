@@ -762,8 +762,8 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, service
             }
             for servicePort, internalPort := range servicePortsToInternalPort {
                 // do not add if already exists
-                if err := runAndLog(redirectCmd("-C", servicePort, internalPort)); err != nil {
-                    if err := runAndLog(redirectCmd("-I", servicePort, internalPort)); err != nil {
+                if err := runAndLog(publicRedirectCmd("-C", servicePort, internalPort)); err != nil {
+                    if err := runAndLog(publicRedirectCmd("-I", servicePort, internalPort)); err != nil {
                         panic(err)
                     }
                 }

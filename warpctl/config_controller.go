@@ -917,8 +917,8 @@ func (self *NginxConfig) addNginxConfig() {
         # Logging Settings
         ##
 
-        access_log /var/log/nginx/access.log;
-        error_log /var/log/nginx/error.log;
+        access_log /dev/stdout;
+        error_log stderr;
 
         ##
         # Gzip Settings

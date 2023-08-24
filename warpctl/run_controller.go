@@ -593,6 +593,38 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
         args = append(args, []string{"-e", fmt.Sprintf("%s=%s", name, value)}...)   
     }
 
+
+    // aws log driver
+    // make sure to configure the docker service with the correct env vars, e.g.
+    //     sudo systemctl edit docker
+    //     [Service]
+    //     Environment="AWS_ACCESS_KEY_ID=<aws_access_key_id>"
+    //     Environment="AWS_SECRET_ACCESS_KEY=<aws_secret_access_key>"
+
+    awsRegion := "us-west-1"
+    logGroup := fmt.Sprintf("%s-%s-%s", self.env, self.service, self.block)
+    var logTag string
+    if host, err := os.Hostname(); err == nil {
+        logTag = fmt.Sprintf(
+            "%s_%s_{{.ID}}",
+            host,
+            convertVersionToDocker(self.deployedVersion.String()),
+        )
+    } else {
+        logTag = fmt.Sprintf(
+            "%s_{{.ID}}",
+            convertVersionToDocker(self.deployedVersion.String()),
+        )
+    }
+    args = append(args, []string{
+        "--log-driver=awslogs",
+        "--log-opt", fmt.Sprintf("awslogs-region=%s", awsRegion),
+        "--log-opt", fmt.Sprintf("awslogs-group=%s", logGroup),
+        "--log-opt", fmt.Sprintf("tag=%s", logTag),
+        "--log-opt", "awslogs-create-group=true",
+    }...)
+
+
     args = append(args, imageName)
     if self.service == "lb" {
         // the lb expects the path of the config to be given as an arg

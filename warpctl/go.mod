@@ -1,4 +1,4 @@
-module bringyour.com/warpctl/v2
+module bringyour.com/warpctl
 
 go 1.20
 

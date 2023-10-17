@@ -516,14 +516,14 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
         Err.Printf("%s versions:\n", service)
         for _, version := range serviceVersions {
             count := statusVersions.versions[version]
-            percent := 100.0 * count / serviceCount
+            percent := float32(100.0 * count) / float32(serviceCount)
             Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
         Err.Printf("config versions:\n")
         for _, version := range configVersions {
             count := statusVersions.configVersions[version]
-            percent := 100.0 * count / configCount
+            percent := float32(100.0 * count) / float32(configCount)
             Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
@@ -578,11 +578,11 @@ func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions 
             errors["error status bad version"] += 1
         }
 
-        
-        if configVersion, err := semver.NewVersion(statusResponse.ConfigVersion); err == nil {
-            configVersions[*configVersion] += 1
-        } else {
-            errors["error status bad config version"] += 1
+        if statusResponse.ConfigVersion != "" {
+            if configVersion, err := semver.NewVersion(statusResponse.ConfigVersion); err == nil {
+                configVersions[*configVersion] += 1
+            }
+            // no config version is not an error
         }
 
         if statusResponse.IsError() {

@@ -1097,8 +1097,9 @@ func (self *NginxConfig) addLbBlock() {
                     self.block(blockLocation, func() {
                         self.raw(`
                         proxy_pass http://service-block-{{.service}}-{{.block}}/status;
-                        proxy_set_header X-Forwarded-For $remote_addr;
+                        proxy_set_header X-Forwarded-For $remote_addr:$remote_port;
                         proxy_set_header Host {{.serviceHost}};
+                        add_header 'Content-Type' 'application/json';
                         `, map[string]any{
                             "service": service,
                             "block": block,
@@ -1170,7 +1171,7 @@ func (self *NginxConfig) addLbBlock() {
                 self.block(location, func() {
                     self.raw(`
                     proxy_pass http://service-block-{{.service}}/;
-                    proxy_set_header X-Forwarded-For $remote_addr;
+                    proxy_set_header X-Forwarded-For $remote_addr:$remote_port;
                     proxy_set_header Host {{.serviceHost}};
                     `, map[string]any{
                         "service": service,
@@ -1191,7 +1192,7 @@ func (self *NginxConfig) addLbBlock() {
                     self.block(blockLocation, func() {
                         self.raw(`
                         proxy_pass http://service-block-{{.service}}-{{.block}}/;
-                        proxy_set_header X-Forwarded-For $remote_addr;
+                        proxy_set_header X-Forwarded-For $remote_addr:$remote_port;
                         proxy_set_header Host {{.serviceHost}};
                         `, map[string]any{
                             "service": service,
@@ -1276,7 +1277,7 @@ func (self *NginxConfig) addServiceBlocks() {
                 self.block(location, func() {
                     self.raw(`
                     proxy_pass http://service-block-{{.service}}/;
-                    proxy_set_header X-Forwarded-For $remote_addr;
+                    proxy_set_header X-Forwarded-For $remote_addr:$remote_port;
                     `, map[string]any{
                         "service": service,
                     })

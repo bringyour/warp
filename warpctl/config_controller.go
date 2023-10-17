@@ -8,6 +8,8 @@ import (
     "strings"
     "sort"
     "crypto/sha256"
+    "regexp"
+    "strconv"
 
     "golang.org/x/exp/maps"
     "golang.org/x/exp/slices"
@@ -72,16 +74,69 @@ type ServicesConfigVersion struct {
 }
 
 
+// a port can be either:
+// - <int port>
+// - <int port>+<int n>, where n is the number of additional consecutive ports starting at the int value
+//   note that <i>+0 is the same as <i>
+// - <int port>-<int port> an inclusive range
 type PortConfig struct {
-    Ports []int `yaml:"ports,omitempty"`
-    UdpPorts []int `yaml:"udp_ports,omitempty"`
+    PortSpecs []string `yaml:"ports,omitempty"`
+    UdpPortSpecs []string `yaml:"udp_ports,omitempty"`
 }
 
 func (self *PortConfig) AllPorts() map[string][]int {
     return map[string][]int {
-        "tcp": self.Ports,
-        "udp": self.UdpPorts,
+        "tcp": expandPortConfigPorts(self.PortSpecs...),
+        "udp": expandPortConfigPorts(self.UdpPortSpecs...),
     }
+}
+
+func (self *PortConfig) Ports() []int {
+    return expandPortConfigPorts(self.PortSpecs...)
+}
+
+func (self *PortConfig) UdpPorts() []int {
+    return expandPortConfigPorts(self.UdpPortSpecs...)
+}
+
+
+func expandPortConfigPorts(portSpecs ...string) []int {
+    ports := map[int]bool{}
+    stablePorts := []int{}
+
+    addPort := func(port int) {
+        if _, ok := ports[port]; !ok {
+            ports[port] = true
+            stablePorts = append(stablePorts, port)
+        }
+    }
+
+    portRe := regexp.MustCompile("^(\\d+)$")
+    portPlusRe := regexp.MustCompile("^(\\d+)\\s*\\+\\s*(\\d+)$")
+    portRangeRe := regexp.MustCompile("^(\\d+)\\s*-\\s*(\\d+)$")
+    for _, portSpec := range portSpecs {
+        portSpec = strings.TrimSpace(portSpec)
+        if groups := portRe.FindStringSubmatch(portSpec); groups != nil {
+            port, _ := strconv.Atoi(groups[1])
+            addPort(port)
+        } else if groups := portPlusRe.FindStringSubmatch(portSpec); groups != nil {
+            port, _ := strconv.Atoi(groups[1])
+            n, _ := strconv.Atoi(groups[2])
+            for i := 0; i <= n; i += 1 {
+                addPort(port + i)
+            }
+        } else if groups := portRangeRe.FindStringSubmatch(portSpec); groups != nil {
+            port, _ := strconv.Atoi(groups[1])
+            endPort, _ := strconv.Atoi(groups[2])
+            for i := 0; port + i <= endPort; i += 1 {
+                addPort(port + i)
+            }
+        } else {
+            panic(fmt.Errorf("Unknown port spec: %s", portSpec))
+        }
+    }
+
+    return stablePorts
 }
 
 
@@ -970,7 +1025,7 @@ func (self *NginxConfig) addUpstreamBlocks() {
     // service-block-<service>-<block>
     for _, service := range self.services() {
         // only service port 80 is exposed via the html block
-        if !slices.Contains(self.servicesConfig.Versions[0].Services[service].Ports, 80) {
+        if !slices.Contains(self.servicesConfig.Versions[0].Services[service].Ports(), 80) {
             continue
         }
 

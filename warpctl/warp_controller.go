@@ -545,7 +545,7 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
 
 type WarpStatusResponse struct {
     Version string `json:"version"`
-    ConfigVersion string `json:"configVersion"`
+    ConfigVersion string `json:"config_version"`
     Status string `json:"status"`
 }
 

@@ -25,7 +25,7 @@ import (
 )
 
 
-const WARP_VERSION = "0.0.1"
+const WarpVersion = "0.0.1"
 
 var Out *log.Logger
 var Err *log.Logger
@@ -117,7 +117,7 @@ Options:
     --target_warp_home=<target_warp_home>      WARP_HOME for the unit.
     --outdir=<outdir>          Output dir.`
 
-    opts, err := docopt.ParseArgs(usage, os.Args[1:], WARP_VERSION)
+    opts, err := docopt.ParseArgs(usage, os.Args[1:], WarpVersion)
     if err != nil {
         panic(err)
     }
@@ -430,7 +430,7 @@ func deploy(opts docopt.Opts) {
         }
         Err.Printf("All versions: %s\n", strings.Join(versionStrs, ", "))
 
-        filteredVersions := []*semver.Version{}
+        filteredVersions := []semver.Version{}
 
         if latestLocal, _ := opts.Bool("latest-local"); latestLocal {
             // keep only versions with pre release of this hostname
@@ -538,10 +538,12 @@ func deploy(opts docopt.Opts) {
     // it's not possible to reach the status routes via the external hostname
 
     // poll the load balancer for the specific blocks until the versions stabilize
+    Err.Printf("Block status:")
     pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion)
 
     if reflect.DeepEqual(blocks, deployBlocks) {
         // poll the load balancer for all blocks until the version stabilizes
+        Err.Printf("Service status:")
         pollLbServiceStatusUntil(env, service, deployVersion)
     }
 
@@ -603,7 +605,7 @@ func lsServices(opts docopt.Opts) {
                     versionsSummary = "no deployed blocks"
                 } else {
                     count := 0
-                    versionCounts := map[*semver.Version]int{}
+                    versionCounts := map[semver.Version]int{}
                     for _, version := range versionMeta.latestBlocks {
                         count += 1
                         versionCounts[version] += 1
@@ -711,10 +713,10 @@ func lsVersions(opts docopt.Opts) {
 
                 semverSortWithBuild(versionMeta.versions)
 
-                baseVersionsMap := map[*semver.Version][]*semver.Version{}
+                baseVersionsMap := map[semver.Version][]semver.Version{}
                 for _, version := range versionMeta.versions {
                     baseVersion := semver.New(fmt.Sprintf("%d.%d.0-%s", version.Major, version.Minor, version.PreRelease))
-                    baseVersionsMap[baseVersion] = append(baseVersionsMap[baseVersion], version)
+                    baseVersionsMap[*baseVersion] = append(baseVersionsMap[*baseVersion], version)
                 }
                 baseVersions := maps.Keys(baseVersionsMap)
                 semverSortWithBuild(baseVersions)
@@ -724,13 +726,13 @@ func lsVersions(opts docopt.Opts) {
                     patchParts := []string{}
                     for i := 0; i < len(versions); {
                         j := i + 1
-                        for ; j < len(versions); j += 1 {
-                            if versions[j - 1].Patch  != versions[j].Patch - 1 {
-                                break
-                            }
+                        for ; j < len(versions) && (
+                                // multiple builds with the same patch
+                                versions[j - 1].Patch == versions[j].Patch ||
+                                versions[j - 1].Patch + 1 == versions[j].Patch); j += 1 {
                         }
                         var patchPart string
-                        if i == j - 1 {
+                        if versions[i].Patch == versions[j - 1].Patch {
                             // single
                             patchPart = fmt.Sprintf("%d", versions[i].Patch)
                         } else {

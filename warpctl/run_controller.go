@@ -94,18 +94,30 @@ func (self *RunWorker) Run() {
         Err.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
 
         deployVersion := func()(bool) {
-            if latestVersion == nil {
-                return false
-            }
-            if self.deployedVersion != nil && *self.deployedVersion == *latestVersion {
-                return false
-            }
             switch self.configMountMode {
             case MOUNT_MODE_NO, MOUNT_MODE_ROOT:
                 // the config version is not needed
-                return true
+                if latestVersion == nil {
+                    return false
+                }
+                if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
+                    return true
+                }
+                return false
             default:
-                return latestConfigVersion != nil
+                if latestVersion == nil {
+                    return false
+                }
+                if latestConfigVersion == nil {
+                    return false
+                }
+                if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
+                    return true
+                }
+                if self.deployedConfigVersion == nil || *self.deployedConfigVersion != *latestConfigVersion {
+                    return true
+                }
+                return false
             }
         }()
 
@@ -149,28 +161,32 @@ func (self *RunWorker) Run() {
 // service version, config version
 func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latestConfigVersion *semver.Version) {
     versionMeta := self.dockerHubClient.getVersionMeta(self.env, self.service)
-    latestVersion = versionMeta.latestBlocks[self.block]
+    if version, ok := versionMeta.latestBlocks[self.block]; ok {
+        latestVersion = &version
+    } else {
+        latestVersion = nil
+    }
 
     entries, err := os.ReadDir(self.warpState.warpSettings.RequireConfigHome())
     if err != nil {
         panic(err)
     }
 
-    configVersions := []*semver.Version{}
+    configVersions := []semver.Version{}
     for _, entry := range entries {
         Err.Printf("TEST CONFIG ENTRY %s\n", entry.Name())
         if entry.IsDir() {
             if version, err := semver.NewVersion(entry.Name()); err == nil {
-                configVersions = append(configVersions, version)
+                configVersions = append(configVersions, *version)
             }
         }
     }
     semverSortWithBuild(configVersions)
     
-    if len(configVersions) == 0 {
-        latestConfigVersion = nil
+    if 0 < len(configVersions) {
+        latestConfigVersion = &configVersions[len(configVersions) - 1]
     } else {
-        latestConfigVersion = configVersions[len(configVersions) - 1]
+        latestConfigVersion = nil
     }
 
     return
@@ -380,7 +396,7 @@ func (self *RunWorker) deploy() error {
     }
     success := false
     defer func() {
-        if !success {
+        if !success && deployedContainerId != "" {
             go NewKillWorker(deployedContainerId).Run()
         }
     }()
@@ -416,7 +432,7 @@ func (self *RunWorker) deploy() error {
         }
     }
 
-    self.redirect(externalPortsToInternalPort, servicePortsToInternalPort)
+    self.redirect(externalPortsToInternalPort, servicePortsToInternalPort, deployedContainerId)
     success = true
     return nil
 }
@@ -589,6 +605,38 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
         args = append(args, []string{"-e", fmt.Sprintf("%s=%s", name, value)}...)   
     }
 
+
+    // aws log driver
+    // make sure to configure the docker service with the correct env vars, e.g.
+    //     sudo systemctl edit docker
+    //     [Service]
+    //     Environment="AWS_ACCESS_KEY_ID=<aws_access_key_id>"
+    //     Environment="AWS_SECRET_ACCESS_KEY=<aws_secret_access_key>"
+
+    awsRegion := "us-west-1"
+    logGroup := fmt.Sprintf("%s-%s-%s", self.env, self.service, self.block)
+    var logTag string
+    if host, err := os.Hostname(); err == nil {
+        logTag = fmt.Sprintf(
+            "%s_%s_{{.ID}}",
+            host,
+            convertVersionToDocker(self.deployedVersion.String()),
+        )
+    } else {
+        logTag = fmt.Sprintf(
+            "%s_{{.ID}}",
+            convertVersionToDocker(self.deployedVersion.String()),
+        )
+    }
+    args = append(args, []string{
+        "--log-driver=awslogs",
+        "--log-opt", fmt.Sprintf("awslogs-region=%s", awsRegion),
+        "--log-opt", fmt.Sprintf("awslogs-group=%s", logGroup),
+        "--log-opt", fmt.Sprintf("tag=%s", logTag),
+        "--log-opt", "awslogs-create-group=true",
+    }...)
+
+
     args = append(args, imageName)
     if self.service == "lb" {
         // the lb expects the path of the config to be given as an arg
@@ -600,11 +648,12 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
     runCmd := docker("run", args...)
 
     out, err := outAndLog(runCmd)
-    if err != nil {
-        return "", err
-    }
     // `docker run` prints the container_id as the only output
     containerId := strings.TrimSpace(string(out))
+
+    if err != nil {
+        return containerId, err
+    }
 
     if self.dockerNetwork != nil {
         // connect to the services network
@@ -685,13 +734,41 @@ func (self *RunWorker) pollBasicContainerStatus(servicePortsToInternalPort map[i
     panic("Could not poll container status.")
 }
 
-func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, servicePortsToInternalPort map[int]int) {
+func (self *RunWorker) redirect(
+    externalPortsToInternalPort map[int]int,
+    servicePortsToInternalPort map[int]int,
+    deployedContainerId string,
+) {
     chainName := self.iptablesChainName()
+
+    var containerIpv4 string
+    if out, err := sudo2(
+            []string{"docker"},
+            "inspect",
+            "-f",
+            "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            deployedContainerId,
+    ).Output(); err == nil {
+        containerIpv4 = strings.TrimSpace(string(out))
+    }
+
+    var containerIpv6 string
+    if out, err := sudo2(
+            []string{"docker"},
+            "inspect",
+            "-f",
+            "{{range.NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}",
+            deployedContainerId,
+    ).Output(); err == nil {
+        containerIpv6 = strings.TrimSpace(string(out))
+    }
+
+    Err.Printf("Container ipv4='%s', ipv6='%s'\n", containerIpv4, containerIpv6)
 
     for _, networkConfig := range self.getNetworkConfigs() {
         // find existing redirects and remove those for the owned external ports
         existingPortsToInternalPorts := map[int]map[int]bool{}
-        redirectRegex := regexp.MustCompile("^\\s*REDIRECT\\s+.*\\s+dpt:(\\d+)\\s+redir\\s+ports\\s+(\\d+)\\s*$")
+        redirectRegex := regexp.MustCompile("^\\s*REDIRECT\\s+.*\\s+tcp\\s+dpt:(\\d+)\\s+redir\\s+ports\\s+(\\d+)\\s*$")
         if out, err := sudo2(networkConfig.iptablesCommand, "-t", "nat", "-L", chainName, "-n").Output(); err == nil {
             /*
             Chain WARP-LOCAL-LB-ENS160 (2 references)
@@ -703,12 +780,12 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, service
                 if groups := redirectRegex.FindStringSubmatch(line); groups != nil {
                     port, _ := strconv.Atoi(groups[1])
                     internalPort, _ := strconv.Atoi(groups[2])
-                    internalPortsMap, ok := existingPortsToInternalPorts[port]
+                    internalPorts, ok := existingPortsToInternalPorts[port]
                     if !ok {
-                        internalPortsMap = map[int]bool{}
-                        existingPortsToInternalPorts[port] = internalPortsMap
+                        internalPorts = map[int]bool{}
+                        existingPortsToInternalPorts[port] = internalPorts
                     }
-                    internalPortsMap[internalPort] = true
+                    internalPorts[internalPort] = true
                 }
             }
         }
@@ -732,8 +809,8 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, service
         }
         // remove existing
         for externalPort, internalPort := range externalPortsToInternalPort {
-            if existingInternalPortsMap, ok := existingPortsToInternalPorts[externalPort]; ok {
-                for existingInternalPort, _ := range existingInternalPortsMap {
+            if existingInternalPorts, ok := existingPortsToInternalPorts[externalPort]; ok {
+                for existingInternalPort, _ := range existingInternalPorts {
                     if internalPort != existingInternalPort {
                         for {
                             cmd := redirectCmd("-D", externalPort, existingInternalPort)
@@ -747,29 +824,74 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, service
         }
 
         if networkConfig.routingTable != nil {
+            existingPortsToDestinations := map[int]map[string]bool{}
+            dnatRegex := regexp.MustCompile("^\\s*DNAT\\s+.*\\s+tcp\\s+dpt:(\\d+)\\s+to:\\s*(\\S+)\\s*$")
+            if out, err := sudo2(networkConfig.iptablesCommand, "-t", "nat", "-L", chainName, "-n").Output(); err == nil {
+                /*
+                Chain WARP-MAIN-LB-ENO2 (2 references)
+                target     prot opt source               destination
+                DNAT       tcp      ::/0                 2001:470:173:52:e643:4bff:fe23:a341  tcp dpt:443 to:[fd00:f1a4:349b:bc6e::3]:443
+                DNAT       tcp      ::/0                 2001:470:173:52:e643:4bff:fe23:a341  tcp dpt:80 to:[fd00:f1a4:349b:bc6e::3]:80
+                */
+                for _, line := range strings.Split(string(out), "\n") {
+                    if groups := dnatRegex.FindStringSubmatch(line); groups != nil {
+                        port, _ := strconv.Atoi(groups[1])
+                        destination := groups[2]
+                        destinations, ok := existingPortsToDestinations[port]
+                        if !ok {
+                            destinations = map[string]bool{}
+                            existingPortsToDestinations[port] = destinations
+                        }
+                        destinations[destination] = true
+                    }
+                }
+            }
+
+            Err.Printf("Existing destinations %s\n", existingPortsToDestinations)
+
+            containerDestination := func(servicePort int)(string) {
+                if networkConfig.ipv6 {
+                    if containerIpv6 == "" {
+                        panic("Container must have ipv6")
+                    }
+                    return fmt.Sprintf("[%s]:%d", containerIpv6, servicePort)
+                } else {
+                    if containerIpv4 == "" {
+                        panic("Container must have ipv4")
+                    }
+                    return fmt.Sprintf("%s:%d", containerIpv4, servicePort)
+                }
+            }
+
             // redirect for traffic to the interface ip on the service port
-            publicRedirectCmd := func(op string, servicePort int, internalPort int) *exec.Cmd {
+            publicRedirectCmd := func(op string, servicePort int, destination string) *exec.Cmd {
+                // use dnat to the container ip and service port to work around the docker issue of masking the remote ip
+                // https://github.com/docker/docs/issues/17312     
+
                 return sudo2(
                     networkConfig.iptablesCommand, "-t", "nat", op, chainName,
                     "-p", "tcp", "-m", "tcp", "-d", networkConfig.routingTable.interfaceIp, "--dport", strconv.Itoa(servicePort),
-                    "-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
+                    "-j", "DNAT", "--to-destination", destination,
                 )
             }
-            for servicePort, internalPort := range servicePortsToInternalPort {
+            for servicePort, _ := range servicePortsToInternalPort {
                 // do not add if already exists
-                if err := runAndLog(redirectCmd("-C", servicePort, internalPort)); err != nil {
-                    if err := runAndLog(redirectCmd("-I", servicePort, internalPort)); err != nil {
+                destination := containerDestination(servicePort)
+                if err := runAndLog(publicRedirectCmd("-C", servicePort, destination)); err != nil {
+                    if err := runAndLog(publicRedirectCmd("-I", servicePort, destination)); err != nil {
                         panic(err)
                     }
                 }
             }
+
             // remove existing
-            for servicePort, internalPort := range servicePortsToInternalPort {
-                if existingInternalPortsMap, ok := existingPortsToInternalPorts[servicePort]; ok {
-                    for existingInternalPort, _ := range existingInternalPortsMap {
-                        if internalPort != existingInternalPort {
+            for servicePort, _ := range servicePortsToInternalPort {
+                destination := containerDestination(servicePort)
+                if existingDestinationsMap, ok := existingPortsToDestinations[servicePort]; ok {
+                    for existingDestination, _ := range existingDestinationsMap {
+                        if destination != existingDestination {
                             for {
-                                cmd := publicRedirectCmd("-D", servicePort, existingInternalPort)
+                                cmd := publicRedirectCmd("-D", servicePort, existingDestination)
                                 if err := runAndLog(cmd); err != nil {
                                     break
                                 }
@@ -901,6 +1023,7 @@ type NetworkInterface struct {
 
 
 type NetworkConfig struct {
+    ipv6 bool
     routingTable *NetworkInterface
     dockerNetwork *NetworkInterface
     ipCommand []string
@@ -933,6 +1056,7 @@ func getNetworkConfigs(routingTable *RoutingTable, dockerNetwork *DockerNetwork)
     
     // ipv4
     networkConfigs = append(networkConfigs, &NetworkConfig{
+        ipv6: false,
         routingTable: routingTableIpv4,
         dockerNetwork: dockerNetworkIpv4,
         ipCommand: []string{"ip"},
@@ -940,6 +1064,7 @@ func getNetworkConfigs(routingTable *RoutingTable, dockerNetwork *DockerNetwork)
     })
     // ipv6
     networkConfigs = append(networkConfigs, &NetworkConfig{
+        ipv6: true,
         routingTable: routingTableIpv6,
         dockerNetwork: dockerNetworkIpv6,
         ipCommand: []string{"ip", "-6"},
@@ -947,7 +1072,6 @@ func getNetworkConfigs(routingTable *RoutingTable, dockerNetwork *DockerNetwork)
     })
     return networkConfigs
 }
-
 
 
 // local docker is always ipv4

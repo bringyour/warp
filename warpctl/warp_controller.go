@@ -406,13 +406,13 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
 type VersionMeta struct {
     env string
     service string
-    versions []*semver.Version
-    latestBlocks map[string]*semver.Version
+    versions []semver.Version
+    latestBlocks map[string]semver.Version
 }
 
 func (self *DockerHubClient) getVersionMeta(env string, service string) *VersionMeta {
-    versionsMap := map[*semver.Version]bool{}
-    latestBlocks := map[string]*semver.Version{}
+    versionsMap := map[semver.Version]bool{}
+    latestBlocks := map[string]semver.Version{}
 
     latestRegex := regexp.MustCompile("^(.*)-latest$")
 
@@ -440,14 +440,14 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
         
         for _, result := range dockerHubImagesResponse.Results {
             if result.Status == "active" {
-                imageVersions := []*semver.Version{}
+                imageVersions := []semver.Version{}
 
                 for _, tag := range result.Tags {
                     if tag.IsCurrent {
                         versionStr := convertVersionFromDocker(tag.Tag)
                         if version, err := semver.NewVersion(versionStr); err == nil {
-                            imageVersions = append(imageVersions, version)
-                            versionsMap[version] = true
+                            imageVersions = append(imageVersions, *version)
+                            versionsMap[*version] = true
                         }
                     }
                 }
@@ -490,9 +490,9 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
         statusVersions := sampleStatusVersions(20, statusUrls)
 
         serviceCount := 0
-        serviceVersions := []*semver.Version{}
+        serviceVersions := []semver.Version{}
         configCount := 0
-        configVersions := []*semver.Version{}
+        configVersions := []semver.Version{}
 
         for version, count := range statusVersions.versions {
             serviceVersions = append(serviceVersions, version)
@@ -516,14 +516,14 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
         Err.Printf("%s versions:\n", service)
         for _, version := range serviceVersions {
             count := statusVersions.versions[version]
-            percent := 100.0 * count / serviceCount
+            percent := float32(100.0 * count) / float32(serviceCount)
             Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
         Err.Printf("config versions:\n")
         for _, version := range configVersions {
             count := statusVersions.configVersions[version]
-            percent := 100.0 * count / configCount
+            percent := float32(100.0 * count) / float32(configCount)
             Err.Printf("    %s: %d (%.1f%%)\n", version.String(), count, percent)
         }
 
@@ -545,7 +545,7 @@ func pollStatusUntil(env string, service string, sampleCount int, statusUrls []s
 
 type WarpStatusResponse struct {
     Version string `json:"version"`
-    ConfigVersion string `json:"configVersion"`
+    ConfigVersion string `json:"config_version"`
     Status string `json:"status"`
 }
 
@@ -557,33 +557,32 @@ func (self *WarpStatusResponse) IsError() bool {
 
 
 type StatusVersions struct {
-    versions map[*semver.Version]int
-    configVersions map[*semver.Version]int
+    versions map[semver.Version]int
+    configVersions map[semver.Version]int
     errors map[string]int
 }
 
 func sampleStatusVersions(sampleCount int, statusUrls []string) *StatusVersions {
     resultsMutex := sync.Mutex{}
-    versions := map[*semver.Version]int{}
-    configVersions := map[*semver.Version]int{}
+    versions := map[semver.Version]int{}
+    configVersions := map[semver.Version]int{}
     errors := map[string]int{}
 
     addResults := func(statusResponse *WarpStatusResponse) {
         resultsMutex.Lock()
         defer resultsMutex.Unlock()
 
-        version, err := semver.NewVersion(statusResponse.Version)
-        if err == nil {
-            versions[version] += 1
+        if version, err := semver.NewVersion(statusResponse.Version); err == nil {
+            versions[*version] += 1
         } else {
             errors["error status bad version"] += 1
         }
 
-        configVersion, err := semver.NewVersion(statusResponse.ConfigVersion)
-        if err == nil {
-            configVersions[configVersion] += 1
-        } else {
-            errors["error status bad config version"] += 1
+        if statusResponse.ConfigVersion != "" {
+            if configVersion, err := semver.NewVersion(statusResponse.ConfigVersion); err == nil {
+                configVersions[*configVersion] += 1
+            }
+            // no config version is not an error
         }
 
         if statusResponse.IsError() {

@@ -1,4 +1,4 @@
-module bringyour.com/warp/config-updater/v2
+module bringyour.com/warp/config-updater
 
 go 1.20
 

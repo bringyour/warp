@@ -25,7 +25,7 @@ import (
 )
 
 
-const WARP_VERSION = "0.0.1"
+const WarpVersion = "0.0.1"
 
 var Out *log.Logger
 var Err *log.Logger
@@ -117,7 +117,7 @@ Options:
     --target_warp_home=<target_warp_home>      WARP_HOME for the unit.
     --outdir=<outdir>          Output dir.`
 
-    opts, err := docopt.ParseArgs(usage, os.Args[1:], WARP_VERSION)
+    opts, err := docopt.ParseArgs(usage, os.Args[1:], WarpVersion)
     if err != nil {
         panic(err)
     }
@@ -538,10 +538,12 @@ func deploy(opts docopt.Opts) {
     // it's not possible to reach the status routes via the external hostname
 
     // poll the load balancer for the specific blocks until the versions stabilize
+    Err.Printf("Block status:")
     pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion)
 
     if reflect.DeepEqual(blocks, deployBlocks) {
         // poll the load balancer for all blocks until the version stabilizes
+        Err.Printf("Service status:")
         pollLbServiceStatusUntil(env, service, deployVersion)
     }
 

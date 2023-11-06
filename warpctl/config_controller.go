@@ -154,6 +154,7 @@ type ServiceConfig struct {
     ExposeAliases []string `yaml:"expose_aliases,omitempty"`
     Exposed *bool `yaml:"exposed,omitempty"`
     LbExposed *bool `yaml:"lb_exposed,omitempty"`
+    Websocket *bool `yaml:"websocket,omitempty"`
     Hosts []string `yaml:"hosts,omitempty"`
     EnvVars map[string]string `yaml:"env_vars,omitempty"`
     Mount map[string]string `yaml:"mount,omitempty"`
@@ -196,6 +197,11 @@ func (self *ServiceConfig) getHiddenPrefix() string {
 
 func (self *ServiceConfig) getHiddenPrefixes() []string {
     return self.HiddenPrefixes
+}
+
+func (self *ServiceConfig) isWebsocket() bool {
+    // default false
+    return self.Websocket != nil && *self.Websocket
 }
 
 
@@ -493,6 +499,8 @@ func getPortBlocks(env string) map[string]map[string]map[int]*PortBlock {
             }
 
             assignedInternalPorts[p] = portBlock
+
+            Err.Printf("Assigned internal port %s %s %d -> %d\n", service, block, port, p)
         }
         portBlock.internalPorts = ps
     }
@@ -1134,6 +1142,8 @@ func (self *NginxConfig) addLbBlock() {
 
             // expose each block status via http so that an exact ip-service-block can be monitored
             for _, service := range self.services() {
+                serviceConfig := self.servicesConfig.Versions[0].Services[service]
+
                 blocks := maps.Keys(self.portBlocks[service])
                 sort.Strings(blocks)
 
@@ -1160,6 +1170,15 @@ func (self *NginxConfig) addLbBlock() {
                             "block": block,
                             "serviceHost": serviceHost,
                         })
+
+                        if serviceConfig.isWebsocket() {
+                            self.raw(`
+                            # support websocket upgrade
+                            proxy_http_version 1.1;
+                            proxy_set_header Upgrade $http_upgrade;
+                            proxy_set_header Connection 'upgrade';
+                            `)
+                        }
                     })
                 }
             }
@@ -1336,6 +1355,15 @@ func (self *NginxConfig) addServiceBlocks() {
                     `, map[string]any{
                         "service": service,
                     })
+
+                    if serviceConfig.isWebsocket() {
+                        self.raw(`
+                        # support websocket upgrade
+                        proxy_http_version 1.1;
+                        proxy_set_header Upgrade $http_upgrade;
+                        proxy_set_header Connection 'upgrade';
+                        `)
+                    }
 
                     addSecurityHeaders := func() {
                         self.raw(`

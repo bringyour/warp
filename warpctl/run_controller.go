@@ -94,18 +94,30 @@ func (self *RunWorker) Run() {
         Err.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
 
         deployVersion := func()(bool) {
-            if latestVersion == nil {
-                return false
-            }
-            if self.deployedVersion != nil && *self.deployedVersion == *latestVersion {
-                return false
-            }
             switch self.configMountMode {
             case MOUNT_MODE_NO, MOUNT_MODE_ROOT:
                 // the config version is not needed
-                return true
+                if latestVersion == nil {
+                    return false
+                }
+                if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
+                    return true
+                }
+                return false
             default:
-                return latestConfigVersion != nil
+                if latestVersion == nil {
+                    return false
+                }
+                if latestConfigVersion == nil {
+                    return false
+                }
+                if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
+                    return true
+                }
+                if self.deployedConfigVersion == nil || *self.deployedConfigVersion != *latestConfigVersion {
+                    return true
+                }
+                return false
             }
         }()
 

@@ -756,7 +756,7 @@ func (self *RunWorker) redirect(
     for _, networkConfig := range self.getNetworkConfigs() {
         // find existing redirects and remove those for the owned external ports
         existingPortsToInternalPorts := map[int]map[int]bool{}
-        redirectRegex := regexp.MustCompile("^\\s*REDIRECT\\s+.*\\s+dpt:(\\d+)\\s+redir\\s+ports\\s+(\\d+)\\s*$")
+        redirectRegex := regexp.MustCompile("^\\s*REDIRECT\\s+.*\\s+tcp\\s+dpt:(\\d+)\\s+redir\\s+ports\\s+(\\d+)\\s*$")
         if out, err := sudo2(networkConfig.iptablesCommand, "-t", "nat", "-L", chainName, "-n").Output(); err == nil {
             /*
             Chain WARP-LOCAL-LB-ENS160 (2 references)
@@ -768,12 +768,12 @@ func (self *RunWorker) redirect(
                 if groups := redirectRegex.FindStringSubmatch(line); groups != nil {
                     port, _ := strconv.Atoi(groups[1])
                     internalPort, _ := strconv.Atoi(groups[2])
-                    internalPortsMap, ok := existingPortsToInternalPorts[port]
+                    internalPorts, ok := existingPortsToInternalPorts[port]
                     if !ok {
-                        internalPortsMap = map[int]bool{}
-                        existingPortsToInternalPorts[port] = internalPortsMap
+                        internalPorts = map[int]bool{}
+                        existingPortsToInternalPorts[port] = internalPorts
                     }
-                    internalPortsMap[internalPort] = true
+                    internalPorts[internalPort] = true
                 }
             }
         }
@@ -797,8 +797,8 @@ func (self *RunWorker) redirect(
         }
         // remove existing
         for externalPort, internalPort := range externalPortsToInternalPort {
-            if existingInternalPortsMap, ok := existingPortsToInternalPorts[externalPort]; ok {
-                for existingInternalPort, _ := range existingInternalPortsMap {
+            if existingInternalPorts, ok := existingPortsToInternalPorts[externalPort]; ok {
+                for existingInternalPort, _ := range existingInternalPorts {
                     if internalPort != existingInternalPort {
                         for {
                             cmd := redirectCmd("-D", externalPort, existingInternalPort)
@@ -812,29 +812,49 @@ func (self *RunWorker) redirect(
         }
 
         if networkConfig.routingTable != nil {
-            // redirect for traffic to the interface ip on the service port
-            legacyPublicRedirectCmd := func(op string, servicePort int, internalPort int) *exec.Cmd {
-                return sudo2(
-                    networkConfig.iptablesCommand, "-t", "nat", op, chainName,
-                    "-p", "tcp", "-m", "tcp", "-d", networkConfig.routingTable.interfaceIp, "--dport", strconv.Itoa(servicePort),
-                    "-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
-                )
+            existingPortsToDestinations := map[int]map[string]bool{}
+            dnatRegex := regexp.MustCompile("^\\s*DNAT\\s+.*\\s+tcp\\s+dpt:(\\d+)\\s+to:\\s*(\\S+)\\s*$")
+            if out, err := sudo2(networkConfig.iptablesCommand, "-t", "nat", "-L", chainName, "-n").Output(); err == nil {
+                /*
+                Chain WARP-MAIN-LB-ENO2 (2 references)
+                target     prot opt source               destination
+                DNAT       tcp      ::/0                 2001:470:173:52:e643:4bff:fe23:a341  tcp dpt:443 to:[fd00:f1a4:349b:bc6e::3]:443
+                DNAT       tcp      ::/0                 2001:470:173:52:e643:4bff:fe23:a341  tcp dpt:80 to:[fd00:f1a4:349b:bc6e::3]:80
+                */
+                for _, line := range strings.Split(string(out), "\n") {
+                    if groups := dnatRegex.FindStringSubmatch(line); groups != nil {
+                        port, _ := strconv.Atoi(groups[1])
+                        destination := groups[2]
+                        destinations, ok := existingPortsToDestinations[port]
+                        if !ok {
+                            destinations = map[string]bool{}
+                            existingPortsToDestinations[port] = destinations
+                        }
+                        destinations[destination] = true
+                    }
+                }
             }
-            publicRedirectCmd := func(op string, servicePort int, internalPort int) *exec.Cmd {
-                // use dnat to the container ip and service port to work around the docker issue of masking the remote ip
-                // https://github.com/docker/docs/issues/17312
-                var destination string
+
+            Err.Printf("Existing destinations %s\n", existingPortsToDestinations)
+
+            containerDestination := func(servicePort int)(string) {
                 if networkConfig.ipv6 {
                     if containerIpv6 == "" {
                         panic("Container must have ipv6")
                     }
-                    destination = fmt.Sprintf("[%s]:%d", containerIpv6, servicePort)
+                    return fmt.Sprintf("[%s]:%d", containerIpv6, servicePort)
                 } else {
                     if containerIpv4 == "" {
                         panic("Container must have ipv4")
                     }
-                    destination = fmt.Sprintf("%s:%d", containerIpv4, servicePort)
+                    return fmt.Sprintf("%s:%d", containerIpv4, servicePort)
                 }
+            }
+
+            // redirect for traffic to the interface ip on the service port
+            publicRedirectCmd := func(op string, servicePort int, destination string) *exec.Cmd {
+                // use dnat to the container ip and service port to work around the docker issue of masking the remote ip
+                // https://github.com/docker/docs/issues/17312     
 
                 return sudo2(
                     networkConfig.iptablesCommand, "-t", "nat", op, chainName,
@@ -842,33 +862,24 @@ func (self *RunWorker) redirect(
                     "-j", "DNAT", "--to-destination", destination,
                 )
             }
-            for servicePort, internalPort := range servicePortsToInternalPort {
-                for {
-                    cmd := legacyPublicRedirectCmd("-D", servicePort, internalPort)
-                    if err := runAndLog(cmd); err != nil {
-                        break
-                    }
-                }
+            for servicePort, _ := range servicePortsToInternalPort {
                 // do not add if already exists
-                if err := runAndLog(publicRedirectCmd("-C", servicePort, internalPort)); err != nil {
-                    if err := runAndLog(publicRedirectCmd("-I", servicePort, internalPort)); err != nil {
+                destination := containerDestination(servicePort)
+                if err := runAndLog(publicRedirectCmd("-C", servicePort, destination)); err != nil {
+                    if err := runAndLog(publicRedirectCmd("-I", servicePort, destination)); err != nil {
                         panic(err)
                     }
                 }
             }
+
             // remove existing
-            for servicePort, internalPort := range servicePortsToInternalPort {
-                if existingInternalPortsMap, ok := existingPortsToInternalPorts[servicePort]; ok {
-                    for existingInternalPort, _ := range existingInternalPortsMap {
-                        if internalPort != existingInternalPort {
+            for servicePort, _ := range servicePortsToInternalPort {
+                destination := containerDestination(servicePort)
+                if existingDestinationsMap, ok := existingPortsToDestinations[servicePort]; ok {
+                    for existingDestination, _ := range existingDestinationsMap {
+                        if destination != existingDestination {
                             for {
-                                cmd := legacyPublicRedirectCmd("-D", servicePort, existingInternalPort)
-                                if err := runAndLog(cmd); err != nil {
-                                    break
-                                }
-                            }
-                            for {
-                                cmd := publicRedirectCmd("-D", servicePort, existingInternalPort)
+                                cmd := publicRedirectCmd("-D", servicePort, existingDestination)
                                 if err := runAndLog(cmd); err != nil {
                                     break
                                 }

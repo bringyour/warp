@@ -420,7 +420,7 @@ func (self *RunWorker) deploy() error {
         }
     }
 
-    self.redirect(externalPortsToInternalPort, servicePortsToInternalPort)
+    self.redirect(externalPortsToInternalPort, servicePortsToInternalPort, deployedContainerId)
     success = true
     return nil
 }
@@ -722,8 +722,36 @@ func (self *RunWorker) pollBasicContainerStatus(servicePortsToInternalPort map[i
     panic("Could not poll container status.")
 }
 
-func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, servicePortsToInternalPort map[int]int) {
+func (self *RunWorker) redirect(
+    externalPortsToInternalPort map[int]int,
+    servicePortsToInternalPort map[int]int,
+    deployedContainerId string,
+) {
     chainName := self.iptablesChainName()
+
+    var containerIpv4 string
+    if out, err := sudo2(
+            []string{"docker"},
+            "inspect",
+            "-f",
+            "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            deployedContainerId,
+    ).Output(); err == nil {
+        containerIpv4 = strings.TrimSpace(string(out))
+    }
+
+    var containerIpv6 string
+    if out, err := sudo2(
+            []string{"docker"},
+            "inspect",
+            "-f",
+            "{{range.NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}",
+            deployedContainerId,
+    ).Output(); err == nil {
+        containerIpv6 = strings.TrimSpace(string(out))
+    }
+
+    Err.Printf("Container ipv4='%s', ipv6='%s'\n", containerIpv4, containerIpv6)
 
     for _, networkConfig := range self.getNetworkConfigs() {
         // find existing redirects and remove those for the owned external ports
@@ -785,14 +813,42 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, service
 
         if networkConfig.routingTable != nil {
             // redirect for traffic to the interface ip on the service port
-            publicRedirectCmd := func(op string, servicePort int, internalPort int) *exec.Cmd {
+            legacyPublicRedirectCmd := func(op string, servicePort int, internalPort int) *exec.Cmd {
                 return sudo2(
                     networkConfig.iptablesCommand, "-t", "nat", op, chainName,
                     "-p", "tcp", "-m", "tcp", "-d", networkConfig.routingTable.interfaceIp, "--dport", strconv.Itoa(servicePort),
                     "-j", "REDIRECT", "--to-ports", strconv.Itoa(internalPort),
                 )
             }
+            publicRedirectCmd := func(op string, servicePort int, internalPort int) *exec.Cmd {
+                // use dnat to the container ip and service port to work around the docker issue of masking the remote ip
+                // https://github.com/docker/docs/issues/17312
+                var destination string
+                if networkConfig.ipv6 {
+                    if containerIpv6 == "" {
+                        panic("Container must have ipv6")
+                    }
+                    destination = fmt.Sprintf("[%s]:%d", containerIpv6, servicePort)
+                } else {
+                    if containerIpv4 == "" {
+                        panic("Container must have ipv4")
+                    }
+                    destination = fmt.Sprintf("%s:%d", containerIpv4, servicePort)
+                }
+
+                return sudo2(
+                    networkConfig.iptablesCommand, "-t", "nat", op, chainName,
+                    "-p", "tcp", "-m", "tcp", "-d", networkConfig.routingTable.interfaceIp, "--dport", strconv.Itoa(servicePort),
+                    "-j", "DNAT", "--to-destination", destination,
+                )
+            }
             for servicePort, internalPort := range servicePortsToInternalPort {
+                for {
+                    cmd := legacyPublicRedirectCmd("-D", servicePort, internalPort)
+                    if err := runAndLog(cmd); err != nil {
+                        break
+                    }
+                }
                 // do not add if already exists
                 if err := runAndLog(publicRedirectCmd("-C", servicePort, internalPort)); err != nil {
                     if err := runAndLog(publicRedirectCmd("-I", servicePort, internalPort)); err != nil {
@@ -805,6 +861,12 @@ func (self *RunWorker) redirect(externalPortsToInternalPort map[int]int, service
                 if existingInternalPortsMap, ok := existingPortsToInternalPorts[servicePort]; ok {
                     for existingInternalPort, _ := range existingInternalPortsMap {
                         if internalPort != existingInternalPort {
+                            for {
+                                cmd := legacyPublicRedirectCmd("-D", servicePort, existingInternalPort)
+                                if err := runAndLog(cmd); err != nil {
+                                    break
+                                }
+                            }
                             for {
                                 cmd := publicRedirectCmd("-D", servicePort, existingInternalPort)
                                 if err := runAndLog(cmd); err != nil {
@@ -938,6 +1000,7 @@ type NetworkInterface struct {
 
 
 type NetworkConfig struct {
+    ipv6 bool
     routingTable *NetworkInterface
     dockerNetwork *NetworkInterface
     ipCommand []string
@@ -970,6 +1033,7 @@ func getNetworkConfigs(routingTable *RoutingTable, dockerNetwork *DockerNetwork)
     
     // ipv4
     networkConfigs = append(networkConfigs, &NetworkConfig{
+        ipv6: false,
         routingTable: routingTableIpv4,
         dockerNetwork: dockerNetworkIpv4,
         ipCommand: []string{"ip"},
@@ -977,6 +1041,7 @@ func getNetworkConfigs(routingTable *RoutingTable, dockerNetwork *DockerNetwork)
     })
     // ipv6
     networkConfigs = append(networkConfigs, &NetworkConfig{
+        ipv6: true,
         routingTable: routingTableIpv6,
         dockerNetwork: dockerNetworkIpv6,
         ipCommand: []string{"ip", "-6"},
@@ -984,7 +1049,6 @@ func getNetworkConfigs(routingTable *RoutingTable, dockerNetwork *DockerNetwork)
     })
     return networkConfigs
 }
-
 
 
 // local docker is always ipv4

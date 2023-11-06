@@ -1368,10 +1368,10 @@ func (self *NginxConfig) addServiceBlocks() {
                     addSecurityHeaders := func() {
                         self.raw(`
                         # see https://syslink.pl/cipherlist/
-                        add_header 'Strict-Transport-Security' 'max-age=63072000; includeSubDomains; preload' always;
-                        add_header 'X-Frame-Options' 'DENY' always;
-                        add_header 'X-Content-Type-Options' 'nosniff' always;
-                        add_header 'X-XSS-Protection' '1; mode=block' always;
+                        add_header Strict-Transport-Security 'max-age=63072000; includeSubDomains; preload' always;
+                        add_header X-Frame-Options 'DENY' always;
+                        add_header X-Content-Type-Options 'nosniff' always;
+                        add_header X-XSS-Protection '1; mode=block' always;
                         `)
                     }
 
@@ -1381,7 +1381,7 @@ func (self *NginxConfig) addServiceBlocks() {
                             # see https://enable-cors.org/server_nginx.html
                             add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}' always;
                             add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version' always;
+                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,Authorization' always;
                             add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
                             `, map[string]any{
                                 // use space separated multiple origins

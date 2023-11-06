@@ -148,8 +148,8 @@ func expandAnyPorts(portSpec any) ([]int, error) {
 
 
 func expandPorts(portsListStr string) ([]int, error) {
-    portRangeRegex := regexp.MustCompile("^(\\d+)-(\\d+)$")
-    portRegex := regexp.MustCompile("^(\\d+)$")
+    portRangeRegex := regexp.MustCompile("^\\s*(\\d+)\\s*-\\s*(\\d+)\\s*$")
+    portRegex := regexp.MustCompile("^\\s*(\\d+)\\s*$")
     ports := []int{}
     for _, portsStr := range strings.Split(portsListStr, ",") {
         if portStrs := portRangeRegex.FindStringSubmatch(portsStr); portStrs != nil {

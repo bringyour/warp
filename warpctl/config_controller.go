@@ -10,9 +10,9 @@ import (
     "crypto/sha256"
     "regexp"
     "strconv"
+    "slices"
 
     "golang.org/x/exp/maps"
-    "golang.org/x/exp/slices"
 
     "gopkg.in/yaml.v3"
     "github.com/coreos/go-semver/semver"

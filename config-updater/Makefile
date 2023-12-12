@@ -12,6 +12,7 @@ build:
 
 	mkdir -p build/${WARP_ENV}/config
 	cp -r ${WARP_CONFIG_HOME}/${WARP_ENV} build/${WARP_ENV}/config/${WARP_VERSION}
+	cp -r ${WARP_CONFIG_HOME}/all/* build/${WARP_ENV}/config/${WARP_VERSION}/
 
 image:
 	docker buildx build --progress=plain \

@@ -78,7 +78,7 @@ Options:
 			os.RemoveAll(targetTempRootPath)
 		}
 		Err.Printf("Copy %s -> %s\n", rootPath, targetTempRootPath)
-		err := copy(rootPath, targetTempRootPath)
+		err := copyConfig(rootPath, targetTempRootPath)
 		if err != nil {
 			Err.Printf("Error during copy. Version %s will not be deployed. (%s)\n", version.String(), err)
 			continue
@@ -91,7 +91,7 @@ Options:
 	}
 }
 
-func copy(sourceRootPath string, targetRootPath string) error {
+func copyConfig(sourceRootPath string, targetRootPath string) error {
 	filepath.Walk(sourceRootPath, func(path string, info fs.FileInfo, err error)(error) {
 		relPath, _ := filepath.Rel(sourceRootPath, path)
 		targetPath := filepath.Join(targetRootPath, relPath)

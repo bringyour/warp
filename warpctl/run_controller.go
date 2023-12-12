@@ -24,6 +24,9 @@ import (
 )
 
 
+const KillTimeout = 15 * time.Second
+
+
 const (
     MOUNT_MODE_NO = "no"
     MOUNT_MODE_YES = "yes"
@@ -1261,7 +1264,7 @@ func (self *KillWorker) Run() {
 
     // ignore errors
     runAndLog(docker(
-        "stop", "container", "--time", "120", self.containerId,
+        "stop", "container", "--time", fmt.Sprintf("%d", int(KillTimeout / time.Second)), self.containerId,
     ))
 }
 

@@ -12,8 +12,7 @@ import (
     "regexp"
     "net"
     "runtime"
-
-    "golang.org/x/exp/slices"
+    "slices"
 
     "github.com/coreos/go-semver/semver"
 )

@@ -16,9 +16,9 @@ import (
     "errors"
     "regexp"
     "log"
+    "slices"
 
     "golang.org/x/exp/maps"
-    "golang.org/x/exp/slices"
 
     "github.com/docopt/docopt-go"
     "github.com/coreos/go-semver/semver"

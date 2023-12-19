@@ -26,6 +26,8 @@ import (
     "github.com/coreos/go-semver/semver"
 )
 
+// see https://docs.docker.com/docker-hub/api/deprecated/
+
 
 type WarpState struct {
     warpHome string
@@ -227,7 +229,7 @@ type DockerHubLoginResponse struct {
 
 type DockerHubReposResponse struct {
     NextUrl *string `json:"next"`
-    Results []DockerHubReposResponseResult `json:"results"`
+    Results []*DockerHubReposResponseResult `json:"results"`
 }
 
 type DockerHubReposResponseResult struct {
@@ -236,20 +238,23 @@ type DockerHubReposResponseResult struct {
     StatusDescription string `json:"status_description"`
 }
 
-type DockerHubImagesResponse struct {
+type DockerHubTagsResponse struct {
     NextUrl *string `json:"next"`
-    Results []DockerHubImagesResponseResult `json:"results"`
+    Results []*DockerHubTagsResponseResult `json:"results"`
 }
 
-type DockerHubImagesResponseResult struct {
-    Tags []DockerHubImagesResponseResultTag `json:"tags"`
-    Status string `json:"status"`
+type DockerHubTagsResponseResult struct {
+    // Tags []DockerHubTagsResponseResultTag `json:"tags"`
+    Name string `json:"name"`
+    Status string `json:"tag_status"`
+    ContentType string `json:"content_type"`
+    Digest string `json:"digest"`
 }
 
-type DockerHubImagesResponseResultTag struct {
-    Tag string `json:"tag"`
-    IsCurrent bool `json:"is_current"`
-}
+// type DockerHubImagesResponseResultTag struct {
+//     Tag string `json:"tag"`
+//     IsCurrent bool `json:"is_current"`
+// }
 
 type DockerHubClient struct {
     warpState *WarpState
@@ -414,9 +419,14 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
     versionsMap := map[semver.Version]bool{}
     latestBlocks := map[string]semver.Version{}
 
+    // digest -> versions
+    digestImageVersions := map[string][]semver.Version{}
+    // block -> digest
+    blockLatestDigests := map[string]string{}
+
     latestRegex := regexp.MustCompile("^(.*)-latest$")
 
-    url := self.NamespaceUrl(fmt.Sprintf("/repositories/%s-%s/images", env, service))
+    url := self.NamespaceUrl(fmt.Sprintf("/repositories/%s-%s/tags", env, service))
     for {
         imagesRequest, err := http.NewRequest("GET", url, nil)
         if err != nil {
@@ -428,52 +438,47 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
         if err != nil {
             panic(err)
         }
-        var dockerHubImagesResponse DockerHubImagesResponse
+        var dockerHubTagsResponse DockerHubTagsResponse
         body, err := io.ReadAll(imagesResponse.Body)
         if err != nil {
             panic(err)
         }
-        err = json.Unmarshal(body, &dockerHubImagesResponse)
+        err = json.Unmarshal(body, &dockerHubTagsResponse)
         if err != nil {
             panic(err)
         }
         
-        for _, result := range dockerHubImagesResponse.Results {
+        for _, result := range dockerHubTagsResponse.Results {
             if result.Status == "active" {
-                imageVersions := []semver.Version{}
-
-                for _, tag := range result.Tags {
-                    if tag.IsCurrent {
-                        versionStr := convertVersionFromDocker(tag.Tag)
-                        if version, err := semver.NewVersion(versionStr); err == nil {
-                            imageVersions = append(imageVersions, *version)
-                            versionsMap[*version] = true
-                        }
-                    }
-                }
-
-                // resolve the latest tag against the other version tags on the image
-                for _, tag := range result.Tags {
-                    if tag.IsCurrent {
-                        if groups := latestRegex.FindStringSubmatch(tag.Tag); groups != nil {
-                            block := groups[1]
-                            // if len(imageVersions) == 0,
-                            //    the latest tag does not have an associated version
-                            // if 1 < len(imageVersions),
-                            //    the latest tag has more than one associated version
-                            if len(imageVersions) == 1 {
-                                latestBlocks[block] = imageVersions[0]
-                            }
-                        }
-                    }
+                versionStr := convertVersionFromDocker(result.Name)
+                if version, err := semver.NewVersion(versionStr); err == nil {
+                    imageVersions := append(digestImageVersions[result.Digest], *version)
+                    digestImageVersions[result.Digest] = imageVersions
+                    versionsMap[*version] = true
+                } else if groups := latestRegex.FindStringSubmatch(result.Name); groups != nil {
+                    block := groups[1]
+                    blockLatestDigests[block] = result.Digest
                 }
             }
         }
 
-        if dockerHubImagesResponse.NextUrl == nil {
+        if dockerHubTagsResponse.NextUrl == nil {
             break
         }
-        url = *dockerHubImagesResponse.NextUrl
+        url = *dockerHubTagsResponse.NextUrl
+    }
+
+    // resolve the latest tag against the other version tags on the image
+    for block, latestDigest := range blockLatestDigests {
+        if imageVersions, ok := digestImageVersions[latestDigest]; ok {
+            // if len(imageVersions) == 0,
+            //    the latest tag does not have an associated version
+            // if 1 < len(imageVersions),
+            //    the latest tag has more than one associated version
+            if len(imageVersions) == 1 {
+                latestBlocks[block] = imageVersions[0]
+            }
+        }
     }
 
     return &VersionMeta{

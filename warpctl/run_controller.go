@@ -51,6 +51,7 @@ type RunWorker struct {
     routingTable *RoutingTable
     dockerNetwork *DockerNetwork
     domain string
+    runArgs []string
 
     vaultMountMode string
     configMountMode string
@@ -646,6 +647,8 @@ func (self *RunWorker) startContainer(servicePortsToInternalPort map[int]int) (s
         // TODO ideally this could be handled with an env var in the docker image, 
         // TODO but unfortunately docker does not allow env vars in the command
         args = append(args, fmt.Sprintf("/srv/warp/nginx.conf/%s.conf", self.block))
+    } else {
+        args = append(args, self.runArgs...)
     }
 
     runCmd := docker("run", args...)

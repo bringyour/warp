@@ -84,6 +84,7 @@ Usage:
         [--status-prefix=<status_prefix>]
         --domain=<domain>
         [--envvar=<envvar>...]
+        [--arg=<arg>]...
     warpctl service drain <env> <service> <block>
         [--portblocks=<portblocks>]
     warpctl service create-units <env> [<service> [<block>]]
@@ -115,7 +116,8 @@ Options:
     --mount_site=<mount_site_mode>             One of: no, yes
     --status=<status_mode>                     One of: no, standard
     --target_warp_home=<target_warp_home>      WARP_HOME for the unit.
-    --outdir=<outdir>          Output dir.`
+    --outdir=<outdir>          Output dir.
+    --arg=<arg>                Arg to pass to the service binary.`
 
     opts, err := docopt.ParseArgs(usage, os.Args[1:], WarpVersion)
     if err != nil {
@@ -981,6 +983,12 @@ func serviceRun(opts docopt.Opts) {
         }
     }
 
+    runArgs := []string{}
+    if args, ok := opts["--args"]; ok {
+        runArgs = args.([]string)
+    }
+
+
     state := getWarpState()
     dockerHubClient := NewDockerHubClient(state)
 
@@ -995,6 +1003,7 @@ func serviceRun(opts docopt.Opts) {
         routingTable: routingTable,
         dockerNetwork: dockerNetwork,
         domain: domain,
+        runArgs: runArgs,
         vaultMountMode: vaultMountMode,
         configMountMode: configMountMode,
         siteMountMode: siteMountMode,

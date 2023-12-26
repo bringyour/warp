@@ -84,7 +84,7 @@ Usage:
         [--status-prefix=<status_prefix>]
         --domain=<domain>
         [--envvar=<envvar>...]
-        [--arg=<arg>]...
+        [--arg=<arg>...]
     warpctl service drain <env> <service> <block>
         [--portblocks=<portblocks>]
     warpctl service create-units <env> [<service> [<block>]]
@@ -984,7 +984,7 @@ func serviceRun(opts docopt.Opts) {
     }
 
     runArgs := []string{}
-    if args, ok := opts["--args"]; ok {
+    if args, ok := opts["--arg"]; ok {
         runArgs = args.([]string)
     }
 

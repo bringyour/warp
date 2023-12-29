@@ -1375,21 +1375,45 @@ func (self *NginxConfig) addServiceBlocks() {
                         `)
                     }
 
-                    addCorsHeaders := func() {
+                    initCorsHeaders := func() {
                         if 0 < len(serviceConfig.CorsOrigins) {
-                            self.raw(`
-                            # see https://enable-cors.org/server_nginx.html
-                            add_header 'Access-Control-Allow-Origin' '{{.corsOrigins}}' always;
-                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,Authorization' always;
-                            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
-                            `, map[string]any{
-                                // use space separated multiple origins
-                                "corsOrigins": strings.Join(serviceConfig.CorsOrigins, " "),
-                            })
+                            if slices.Contains(serviceConfig.CorsOrigins, "*") {
+                                self.raw(`
+                                set $cors_origin '*';
+                                `)
+                            } else {
+                                // return the origin for the specific client making the request, per
+                                // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Origin
+                                self.raw(`
+                                set $cors_origin '';
+                                `)
+                                for _, corsOrigin := range serviceConfig.CorsOrigins {
+                                    self.raw(`
+                                    if ($http_origin = '{{.corsOrigin}}') {
+                                        set $cors_origin '{{.corsOrigin}}';
+                                    }
+                                    `, map[string]any{
+                                        "corsOrigin": corsOrigin,
+                                    })
+                                }
+                            }
                         }
                     }
 
+                    addCorsHeaders := func() {
+                        // initCorsHeaders must have been added before this in the block
+                        if 0 < len(serviceConfig.CorsOrigins) {
+                            self.raw(`
+                            # see https://enable-cors.org/server_nginx.html
+                            add_header 'Access-Control-Allow-Origin' $cors_origin always;
+                            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,Authorization' always;
+                            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+                            `)
+                        }
+                    }
+
+                    initCorsHeaders()
                     if 0 < len(serviceConfig.CorsOrigins) {
                         self.block("if ($request_method = 'OPTIONS')", func() {
                             // nginx inheritance model does not inheret `add_header` into a block where another `add_header` is defined

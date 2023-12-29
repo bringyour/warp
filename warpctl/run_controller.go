@@ -24,6 +24,7 @@ import (
 )
 
 
+const WarpPollTimeout = 5 * time.Minute
 const KillTimeout = 15 * time.Second
 
 
@@ -156,7 +157,7 @@ func (self *RunWorker) Run() {
             announceRunWaitForConfig()
         }
 
-        self.quitEvent.WaitForSet(60 * time.Second)
+        self.quitEvent.WaitForSet(WarpPollTimeout)
     }
 
     Err.Printf("Run worker stop.")

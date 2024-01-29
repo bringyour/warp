@@ -95,38 +95,45 @@ func (self *RunWorker) Run() {
         // e.g. netplan resetting all the ip rules
         initNetwork()
 
-        latestVersion, latestConfigVersion := self.getLatestVersion()
-        Err.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
+        latestVersion, latestConfigVersion, err := self.getLatestVersion()
+        
+        var deployable bool
 
-        deployVersion := func()(bool) {
-            switch self.configMountMode {
-            case MOUNT_MODE_NO, MOUNT_MODE_ROOT:
-                // the config version is not needed
-                if latestVersion == nil {
+        if err != nil {
+            Err.Printf("Polled latest version error: %s\n", err)
+            deployable = false
+        } else {
+            Err.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
+            deployable = func()(bool) {
+                switch self.configMountMode {
+                case MOUNT_MODE_NO, MOUNT_MODE_ROOT:
+                    // the config version is not needed
+                    if latestVersion == nil {
+                        return false
+                    }
+                    if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
+                        return true
+                    }
+                    return false
+                default:
+                    if latestVersion == nil {
+                        return false
+                    }
+                    if latestConfigVersion == nil {
+                        return false
+                    }
+                    if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
+                        return true
+                    }
+                    if self.deployedConfigVersion == nil || *self.deployedConfigVersion != *latestConfigVersion {
+                        return true
+                    }
                     return false
                 }
-                if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
-                    return true
-                }
-                return false
-            default:
-                if latestVersion == nil {
-                    return false
-                }
-                if latestConfigVersion == nil {
-                    return false
-                }
-                if self.deployedVersion == nil || *self.deployedVersion != *latestVersion {
-                    return true
-                }
-                if self.deployedConfigVersion == nil || *self.deployedConfigVersion != *latestConfigVersion {
-                    return true
-                }
-                return false
-            }
-        }()
+            }()
+        }
 
-        if deployVersion {
+        if deployable {
             // deploy new version
             self.deployedVersion = latestVersion
             self.deployedConfigVersion = latestConfigVersion
@@ -164,8 +171,18 @@ func (self *RunWorker) Run() {
 }
 
 // service version, config version
-func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latestConfigVersion *semver.Version) {
-    versionMeta := self.dockerHubClient.getVersionMeta(self.env, self.service)
+func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latestConfigVersion *semver.Version, returnErr error) {
+    versionMeta, err := self.dockerHubClient.getVersionMeta(self.env, self.service)
+    if err != nil {
+        // the token might have expired. Try to login again.
+        self.dockerHubClient.Login()
+        versionMeta, err = self.dockerHubClient.getVersionMeta(self.env, self.service)
+        if err != nil {
+            returnErr = err
+            return
+        }
+    }
+
     if version, ok := versionMeta.latestBlocks[self.block]; ok {
         latestVersion = &version
     } else {
@@ -174,7 +191,8 @@ func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latest
 
     entries, err := os.ReadDir(self.warpState.warpSettings.RequireConfigHome())
     if err != nil {
-        panic(err)
+        returnErr = err
+        return
     }
 
     configVersions := []semver.Version{}

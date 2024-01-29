@@ -256,18 +256,28 @@ type DockerHubTagsResponseResult struct {
 //     IsCurrent bool `json:"is_current"`
 // }
 
+
 type DockerHubClient struct {
     warpState *WarpState
     httpClient *http.Client
+    tokenCreateTime time.Time
     token string
 }
 
 func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
-    httpClient := &http.Client{}
+    dockerHubClient := &DockerHubClient{
+        warpState: warpState,
+        httpClient: DefaultHttpClient(),
+    }
+    dockerHubClient.Login()
 
+    return dockerHubClient
+}
+
+func (self *DockerHubClient) Login() {
     dockerHubLoginRequest := DockerHubLoginRequest{
-        Username: warpState.warpSettings.RequireDockerHubUsername(),
-        Password: warpState.warpSettings.RequireDockerHubToken(),
+        Username: self.warpState.warpSettings.RequireDockerHubUsername(),
+        Password: self.warpState.warpSettings.RequireDockerHubToken(),
     }
     loginRequestJson, err := json.Marshal(dockerHubLoginRequest)
     if err != nil {
@@ -282,7 +292,7 @@ func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
         panic(err)
     }
     loginRequest.Header.Add("Content-Type", "application/json")
-    loginResponse, err := httpClient.Do(loginRequest)
+    loginResponse, err := self.httpClient.Do(loginRequest)
     if err != nil {
         panic(err)
     }
@@ -297,11 +307,7 @@ func NewDockerHubClient(warpState *WarpState) *DockerHubClient {
         panic(err)
     }
 
-    return &DockerHubClient{
-        warpState: warpState,
-        httpClient: httpClient,
-        token: dockerHubLoginResponse.Token,
-    }
+    self.token = dockerHubLoginResponse.Token
 }
 
 func (self *DockerHubClient) AddAuthorizationHeader(request *http.Request) {
@@ -324,30 +330,30 @@ type ServiceMeta struct {
     envVersionMetas map[string]map[string]*VersionMeta
 }
 
-func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
+func (self *DockerHubClient) getServiceMeta() (*ServiceMeta, error) {
     repoNames := []string{}
 
     url := self.NamespaceUrl("/repositories")
     for {
         reposRequest, err := http.NewRequest("GET", url, nil)
         if err != nil {
-            panic(err)
+            return nil, err
         }
         self.AddAuthorizationHeader(reposRequest)
 
         reposResponse, err := self.httpClient.Do(reposRequest)
         if err != nil {
-            panic(err)
+            return nil, err
         }
 
         var dockerHubReposResponse DockerHubReposResponse
         body, err := io.ReadAll(reposResponse.Body)
         if err != nil {
-            panic(err)
+            return nil, err
         }
         err = json.Unmarshal(body, &dockerHubReposResponse)
         if err != nil {
-            panic(err)
+            return nil, err
         }
 
         for _, result := range dockerHubReposResponse.Results {
@@ -381,7 +387,10 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
         env := groups[1]
         service := groups[2]
 
-        versionMeta := self.getVersionMeta(env, service)
+        versionMeta, err := self.getVersionMeta(env, service)
+        if err != nil {
+            return nil, err
+        }
 
         if envVersionMetas[env] == nil {
             envVersionMetas[env] = map[string]*VersionMeta{}
@@ -404,7 +413,7 @@ func (self *DockerHubClient) getServiceMeta() *ServiceMeta {
         services: services,
         blocks: blocks,
         envVersionMetas: envVersionMetas,
-    }
+    }, nil
 }
 
 
@@ -415,7 +424,7 @@ type VersionMeta struct {
     latestBlocks map[string]semver.Version
 }
 
-func (self *DockerHubClient) getVersionMeta(env string, service string) *VersionMeta {
+func (self *DockerHubClient) getVersionMeta(env string, service string) (*VersionMeta, error) {
     versionsMap := map[semver.Version]bool{}
     latestBlocks := map[string]semver.Version{}
 
@@ -430,22 +439,22 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
     for {
         imagesRequest, err := http.NewRequest("GET", url, nil)
         if err != nil {
-            panic(err)
+            return nil, err
         }
         self.AddAuthorizationHeader(imagesRequest)
 
         imagesResponse, err := self.httpClient.Do(imagesRequest)
         if err != nil {
-            panic(err)
+            return nil, err
         }
         var dockerHubTagsResponse DockerHubTagsResponse
         body, err := io.ReadAll(imagesResponse.Body)
         if err != nil {
-            panic(err)
+            return nil, err
         }
         err = json.Unmarshal(body, &dockerHubTagsResponse)
         if err != nil {
-            panic(err)
+            return nil, err
         }
         
         for _, result := range dockerHubTagsResponse.Results {
@@ -486,7 +495,7 @@ func (self *DockerHubClient) getVersionMeta(env string, service string) *Version
         service: service,
         versions: maps.Keys(versionsMap),
         latestBlocks: latestBlocks,
-    }
+    }, nil
 }
 
 

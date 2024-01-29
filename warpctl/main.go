@@ -422,7 +422,10 @@ func deploy(opts docopt.Opts) {
     if version, err := opts.String("<version>"); err == nil {
         deployVersion = version
     } else {
-        versionMeta := dockerHubClient.getVersionMeta(env, service)
+        versionMeta, err := dockerHubClient.getVersionMeta(env, service)
+        if err != nil {
+            panic(err)
+        }
         versions := versionMeta.versions
         semverSortWithBuild(versions)
 
@@ -589,7 +592,10 @@ func lsServices(opts docopt.Opts) {
     state := getWarpState()
     dockerHubClient := NewDockerHubClient(state)
 
-    serviceMeta := dockerHubClient.getServiceMeta()
+    serviceMeta, err := dockerHubClient.getServiceMeta()
+    if err != nil {
+        panic(err)
+    }
 
     sort.Strings(serviceMeta.envs)
     sort.Strings(serviceMeta.services)
@@ -657,7 +663,10 @@ func lsServiceBlocks(opts docopt.Opts) {
     state := getWarpState()
     dockerHubClient := NewDockerHubClient(state)
 
-    serviceMeta := dockerHubClient.getServiceMeta()
+    serviceMeta, err := dockerHubClient.getServiceMeta()
+    if err != nil {
+        panic(err)
+    }
 
     sort.Strings(serviceMeta.envs)
     sort.Strings(serviceMeta.services)
@@ -697,7 +706,10 @@ func lsVersions(opts docopt.Opts) {
     state := getWarpState()
     dockerHubClient := NewDockerHubClient(state)
 
-    serviceMeta := dockerHubClient.getServiceMeta()
+    serviceMeta, err := dockerHubClient.getServiceMeta()
+    if err != nil {
+        panic(err)
+    }
 
     sort.Strings(serviceMeta.envs)
     sort.Strings(serviceMeta.services)

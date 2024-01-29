@@ -1369,7 +1369,7 @@ func (self *NginxConfig) addServiceBlocks() {
                         self.raw(`
                         # see https://syslink.pl/cipherlist/
                         add_header Strict-Transport-Security 'max-age=63072000; includeSubDomains; preload' always;
-                        add_header X-Frame-Options 'DENY' always;
+                        add_header X-Frame-Options 'SAMEORIGIN' always;
                         add_header X-Content-Type-Options 'nosniff' always;
                         add_header X-XSS-Protection '1; mode=block' always;
                         `)

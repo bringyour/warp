@@ -96,6 +96,12 @@ func (self *RunWorker) Run() {
         initNetwork()
 
         latestVersion, latestConfigVersion, err := self.getLatestVersion()
+        if err != nil || latestVersion == nil {
+            // the token might have expired. Try to login again.
+            self.dockerHubClient.Login()
+            latestVersion, latestConfigVersion, err = self.getLatestVersion()
+        }
+        
         
         var deployable bool
 
@@ -174,13 +180,8 @@ func (self *RunWorker) Run() {
 func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latestConfigVersion *semver.Version, returnErr error) {
     versionMeta, err := self.dockerHubClient.getVersionMeta(self.env, self.service)
     if err != nil {
-        // the token might have expired. Try to login again.
-        self.dockerHubClient.Login()
-        versionMeta, err = self.dockerHubClient.getVersionMeta(self.env, self.service)
-        if err != nil {
-            returnErr = err
-            return
-        }
+        returnErr = err
+        return
     }
 
     if version, ok := versionMeta.latestBlocks[self.block]; ok {
@@ -1204,12 +1205,12 @@ func getNetworkInterfaces(interfaceName string) ([]*NetworkInterface, []*Network
 
     iface, err := net.InterfaceByName(interfaceName)
     if err != nil {
-        return nil, nil, err
+        return nil, nil, fmt.Errorf("Could not find interface for %s: %s", interfaceName, err)
     }
 
     addrs, err := iface.Addrs()
     if err != nil {
-        return nil, nil, err
+        return nil, nil, fmt.Errorf("Could not find interface addresses for %s: %s", interfaceName, err)
     }
 
     v4NetworkInterfaces := []*NetworkInterface{}

@@ -218,18 +218,23 @@ func (self *LbBlock) getRateLimit() *RateLimit {
         return self.RateLimit
     }
     // rate defaults
-    return &RateLimit{
-        RequestsPerSecond: 50,
-        Burst: 100,
-        Delay: 25,
-    }
+    return DefaultRateLimit()
 }
 
 
 type RateLimit struct {
     RequestsPerSecond int `yaml:"requests_per_second,omitempty"`
+    RequestsPerMinute int `yaml:"requests_per_minute,omitempty"`
     Burst int `yaml:"burst,omitempty"`
     Delay int `yaml:"delay,omitempty"`
+}
+
+func DefaultRateLimit() *RateLimit {
+    return &RateLimit{
+        RequestsPerMinute: 120,
+        Burst: 120,
+        Delay: 30,
+    }
 }
 
 
@@ -994,12 +999,21 @@ func (self *NginxConfig) addNginxConfig() {
 
         // rate limiters
         rateLimit := self.lbBlockInfo.lbBlock.getRateLimit()
+
+        var requests string
+        if 0 < rateLimit.RequestsPerMinute {
+            requests = fmt.Sprintf("%dr/m", rateLimit.RequestsPerMinute)
+        } else {
+            requests = fmt.Sprintf("%dr/s", rateLimit.RequestsPerSecond)
+        }
+
         self.raw(`
         # see https://www.nginx.com/blog/rate-limiting-nginx/
-        limit_req_zone $binary_remote_addr zone=standardlimit:128m rate={{.requestsPerSecond}}r/s;
+        limit_req_status 429;
+        limit_req_zone $binary_remote_addr zone=standardlimit:128m rate={{.requests}};
         limit_req zone=standardlimit burst={{.burst}} delay={{.delay}};
         `, map[string]any{
-            "requestsPerSecond": rateLimit.RequestsPerSecond,
+            "requests": requests,
             "burst": rateLimit.Burst,
             "delay": rateLimit.Delay,
         })

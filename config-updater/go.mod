@@ -1,6 +1,6 @@
 module bringyour.com/warp/config-updater
 
-go 1.20
+go 1.22
 
 require (
 	github.com/coreos/go-semver v0.3.1 // indirect

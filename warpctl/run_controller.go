@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,8 +16,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
 	// "os/signal"
 
+	"bringyour.com/warpctl/dynamo"
 	"golang.org/x/exp/maps"
 
 	"github.com/coreos/go-semver/semver"
@@ -39,6 +42,7 @@ const (
 type RunWorker struct {
 	warpState       *WarpState
 	dockerHubClient *DockerHubClient
+	dynamoClient    *dynamo.Client
 
 	env                   string
 	service               string
@@ -173,16 +177,15 @@ func (self *RunWorker) Run() {
 
 // service version, config version
 func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latestConfigVersion *semver.Version, returnErr error) {
-	versionMeta, err := self.dockerHubClient.getVersionMeta(self.env, self.service)
+
+	v, err := self.dynamoClient.GetLatestVersion(context.Background(), self.env, self.service, self.block)
 	if err != nil {
-		returnErr = err
-		return
+		return nil, nil, fmt.Errorf("unable to get latest version: %w", err)
 	}
 
-	if version, ok := versionMeta.latestBlocks[self.block]; ok {
-		latestVersion = &version
-	} else {
-		latestVersion = nil
+	latestVersion, err = semver.NewVersion(v)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to parse latest version: %w", err)
 	}
 
 	entries, err := os.ReadDir(self.warpState.warpSettings.RequireConfigHome())

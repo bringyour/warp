@@ -1,17 +1,16 @@
 package main
 
 import (
-	"os"
-	"log"
-	"path/filepath"
-	"io/fs"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
+	"os"
+	"path/filepath"
 
+	"github.com/coreos/go-semver/semver"
 	"github.com/docopt/docopt-go"
-    "github.com/coreos/go-semver/semver"
 )
-
 
 const CONFIG_UPDATER_VERSION = "0.0.1"
 
@@ -19,10 +18,9 @@ var Out *log.Logger
 var Err *log.Logger
 
 func init() {
-	Out = log.New(os.Stdout, "", log.Ldate | log.Ltime | log.Lshortfile)
-	Err = log.New(os.Stderr, "", log.Ldate | log.Ltime | log.Lshortfile)
+	Out = log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
+	Err = log.New(os.Stderr, "", log.Ldate|log.Ltime|log.Lshortfile)
 }
-
 
 /*
 copy all dirs recursively from `/root/config/*` to `/srv/warp/config` in a safe sequence:
@@ -41,10 +39,10 @@ Options:
     -h --help                  Show this screen.
     --version                  Show version.`
 
-    opts, err := docopt.ParseArgs(usage, os.Args[1:], CONFIG_UPDATER_VERSION)
-    if err != nil {
-        panic(err)
-    }
+	opts, err := docopt.ParseArgs(usage, os.Args[1:], CONFIG_UPDATER_VERSION)
+	if err != nil {
+		panic(err)
+	}
 
 	sourceDir, _ := opts.String("<source_dir>")
 	destDir, _ := opts.String("<dest_dir>")
@@ -92,7 +90,7 @@ Options:
 }
 
 func copyConfig(sourceRootPath string, targetRootPath string) error {
-	filepath.Walk(sourceRootPath, func(path string, info fs.FileInfo, err error)(error) {
+	filepath.Walk(sourceRootPath, func(path string, info fs.FileInfo, err error) error {
 		relPath, _ := filepath.Rel(sourceRootPath, path)
 		targetPath := filepath.Join(targetRootPath, relPath)
 		if info.IsDir() {
@@ -108,6 +106,3 @@ func copyConfig(sourceRootPath string, targetRootPath string) error {
 	})
 	return nil
 }
-
-
-

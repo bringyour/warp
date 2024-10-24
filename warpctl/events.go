@@ -1,65 +1,63 @@
 package main
 
 import (
-    "time"
-    "os"
-    "os/signal"
-    "syscall"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
-
-
 type Event struct {
-    set chan bool
+	set chan bool
 }
 
 func NewEvent() *Event {
-    return &Event{
-        set: make(chan bool, 0),
-    }
+	return &Event{
+		set: make(chan bool, 0),
+	}
 }
 
 func (self *Event) Set() {
-    close(self.set)
+	close(self.set)
 }
 
 func (self *Event) IsSet() bool {
-    select {
-        case <- self.set:
-            return true
-        default:
-            return false
-    }
+	select {
+	case <-self.set:
+		return true
+	default:
+		return false
+	}
 }
 
 func (self *Event) WaitForSet(timeout time.Duration) bool {
-    select {
-        case <- self.set:
-            return true
-        case <- time.After(timeout):
-            return false
-    }
+	select {
+	case <-self.set:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func (self *Event) SetOnSignals(signalValues ...syscall.Signal) func() {
-    stopSignal := make(chan os.Signal, len(signalValues))
-    for _, signalValue := range signalValues {
-        signal.Notify(stopSignal, signalValue)
-    }
-    go func() {
-        for {
-            select {
-            case _, ok := <- stopSignal:
-                if ok {
-                    self.Set()
-                } else {
-                    return
-                }
-            }
-        }
-    }()
-    return func(){
-        signal.Stop(stopSignal)
-        close(stopSignal)
-    }
+	stopSignal := make(chan os.Signal, len(signalValues))
+	for _, signalValue := range signalValues {
+		signal.Notify(stopSignal, signalValue)
+	}
+	go func() {
+		for {
+			select {
+			case _, ok := <-stopSignal:
+				if ok {
+					self.Set()
+				} else {
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(stopSignal)
+		close(stopSignal)
+	}
 }

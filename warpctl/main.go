@@ -998,6 +998,9 @@ func serviceRun(opts docopt.Opts) {
 	state := getWarpState()
 	dockerHubClient := NewDockerHubClient(state)
 
+	// set home to the vault
+	os.Setenv("HOME", state.warpSettings.RequireVaultHome())
+
 	dc, err := dynamo.NewClient()
 	if err != nil {
 		panic(err)

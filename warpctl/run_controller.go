@@ -25,7 +25,7 @@ import (
 	"github.com/coreos/go-semver/semver"
 )
 
-const WarpPollTimeout = 5 * time.Minute
+const WarpPollTimeout = 5 * time.Second
 const KillTimeout = 15 * time.Second
 
 const (

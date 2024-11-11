@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+
 	// "encoding/json"
 	"math"
 	"reflect"
 	"sort"
 	"strings"
 	"time"
+
 	// "syscall"
 	// "os/signal"
 	"errors"
@@ -18,6 +21,7 @@ import (
 	"regexp"
 	"slices"
 
+	"bringyour.com/warpctl/dynamo"
 	"golang.org/x/exp/maps"
 
 	"github.com/coreos/go-semver/semver"
@@ -410,6 +414,11 @@ func deploy(opts docopt.Opts) {
 	state := getWarpState()
 	dockerHubClient := NewDockerHubClient(state)
 
+	dc, err := dynamo.NewClient()
+	if err != nil {
+		panic(err)
+	}
+
 	var deployVersion string
 
 	if version, err := opts.String("<version>"); err == nil {
@@ -526,6 +535,11 @@ func deploy(opts docopt.Opts) {
 		cmd := docker("buildx", "imagetools", "create", "-t", deployImageName, sourceImageName)
 		cmd.Dir = state.warpVersionHome
 		if err := runAndLog(cmd); err != nil {
+			panic(err)
+		}
+
+		err = dc.UpdateVersion(context.Background(), env, service, block, deployVersion)
+		if err != nil {
 			panic(err)
 		}
 
@@ -984,9 +998,18 @@ func serviceRun(opts docopt.Opts) {
 	state := getWarpState()
 	dockerHubClient := NewDockerHubClient(state)
 
+	// set home to the vault
+	os.Setenv("HOME", state.warpSettings.RequireVaultHome())
+
+	dc, err := dynamo.NewClient()
+	if err != nil {
+		panic(err)
+	}
+
 	runWorker := &RunWorker{
 		warpState:             state,
 		dockerHubClient:       dockerHubClient,
+		dynamoClient:          dc,
 		env:                   env,
 		service:               service,
 		block:                 block,

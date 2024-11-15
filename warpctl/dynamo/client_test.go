@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"bringyour.com/warpctl/dynamo"
+	"github.com/urnetwork/warp/warpctl/dynamo"
 )
 
 // XTestClient is a test function that tests the dynamo client

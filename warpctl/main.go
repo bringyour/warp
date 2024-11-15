@@ -21,7 +21,7 @@ import (
 	"regexp"
 	"slices"
 
-	"bringyour.com/warpctl/dynamo"
+	"github.com/urnetwork/warp/warpctl/dynamo"
 	"golang.org/x/exp/maps"
 
 	"github.com/coreos/go-semver/semver"

@@ -1,4 +1,4 @@
-module bringyour.com/warpctl
+module github.com/urnetwork/warp/warpctl
 
 go 1.22
 

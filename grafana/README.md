@@ -81,11 +81,12 @@ internal ones.
     create database grafana owner grafana;
     ```
 
-2. MinIO on the storage host (data under `/data/minio`, port 23900 on the lan ip):
+2. MinIO on the storage host (on Main, edge-5: one erasure set over
+   `/mnt/blob1/minio` to `/mnt/blob4/minio`, port 23900 on the lan ip):
 
     ```
     cd xops/main/ansible
-    ./run-minio.sh
+    ./run-minio-clusters.sh
     ```
 
 3. DNS: `<env>-grafana.<domain>` resolves to the lb ips like any exposed
@@ -177,11 +178,11 @@ docker systemd drop-ins on the hosts.
   `mimir.retention` (default 2160h) by the mimir compactor — retention is
   time based (loki and mimir have no size based retention).
   `loki.max_storage` / `mimir.max_storage` in grafana.yml set hard minio
-  bucket quotas as a disk backstop, applied by `run-minio.sh` (rerun it after
-  changing them). When a quota is reached minio rejects new writes and
+  bucket quotas as a disk backstop, applied by `run-minio-clusters.sh` (rerun
+  it after changing them). When a quota is reached minio rejects new writes and
   ingestion degrades until retention frees space — so size retention to stay
-  well below the quota. MinIO holds a single copy: back up `/data/minio` if
-  history matters.
+  well below the quota. MinIO runs on one host: its erasure set survives failed
+  drives, not the loss of the host, so back up the buckets if history matters.
 - **Loki push limits**: pushes older than 168h are rejected, and out of order
   entries are accepted within ~1h per stream. A host that was down for longer
   backfills what fits these windows.

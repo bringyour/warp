@@ -681,9 +681,14 @@ versions:
 
 // The production main env lives in the sibling vault repository and is
 // git-crypt encrypted at rest, so the assertions run only where a decrypted
-// checkout is present. The shape, not the host names, is what is pinned.
+// checkout is present, and only on request (WARP_VAULT_TESTS=1): a default
+// run never reads the vault. The TestSyntheticMain tests run the same checks
+// on synthetic configs. The shape, not the host names, is what is pinned.
 func loadSiblingVaultServicesConfig(t *testing.T, env string) *ServicesConfig {
 	t.Helper()
+	if os.Getenv("WARP_VAULT_TESTS") != "1" {
+		t.Skip("reads the sibling production vault; set WARP_VAULT_TESTS=1 to run")
+	}
 	vaultDir := filepath.Join("..", "..", "vault")
 	data, err := os.ReadFile(filepath.Join(vaultDir, env, "services.yml"))
 	if err != nil {
@@ -699,11 +704,65 @@ func loadSiblingVaultServicesConfig(t *testing.T, env string) *ServicesConfig {
 	return servicesConfig
 }
 
+// A synthetic main env with the shape the TestVaultMain checks pin: alt beside
+// proxy on the proxy hosts with no lb in front, and connect behind the lb on
+// udp 443 and 4053 with public udp 53 forwarded to 4053.
+const syntheticMainServicesYaml = `
+versions:
+  - lb:
+      interfaces:
+        edge-0.example.com:
+          eth0: {}
+        proxy-0.example.com:
+          eth0: {}
+        proxy-1.example.com:
+          eth0: {}
+      udp_stream_port_services:
+        443: connect
+        4053: connect
+      udp_forward_ports:
+        53: 4053
+    host_services:
+      edge-0.example.com: [connect]
+      proxy-0.example.com: [proxy, alt]
+      proxy-1.example.com: [proxy, alt]
+    services:
+      connect:
+        ports: [80, 5080, 5090]
+        udp_stream_ports: [443, 4053]
+      proxy:
+        hosts: [proxy-0.example.com, proxy-1.example.com]
+        ports: [80]
+      alt:
+        hosts: [proxy-0.example.com, proxy-1.example.com]
+        exposed: false
+        ports: [80, 5080, 5090]
+        external_udp_ports: [443, 4053]
+        blocks:
+          - main: 1
+`
+
+func loadSyntheticMainServicesConfig(t *testing.T) *ServicesConfig {
+	t.Helper()
+	servicesConfig, err := loadInlineServicesConfig(t, syntheticMainServicesYaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return servicesConfig
+}
+
 // The alt service runs on the proxy hosts with no lb in front and owns public
 // udp 443 and 4053 there (connect/EXTENDER.md 3.L1, 3.L2).
 func TestVaultMainAltService(t *testing.T) {
-	version := loadSiblingVaultServicesConfig(t, "main").Latest()
+	checkMainAltService(t, loadSiblingVaultServicesConfig(t, "main").Latest())
+}
 
+func TestSyntheticMainAltService(t *testing.T) {
+	checkMainAltService(t, loadSyntheticMainServicesConfig(t).Latest())
+}
+
+func checkMainAltService(t *testing.T, version *ServicesConfigVersion) {
+	t.Helper()
 	altConfig, ok := version.Services["alt"]
 	if !ok {
 		t.Fatal("the main env has no alt service")
@@ -768,8 +827,15 @@ func TestVaultMainAltService(t *testing.T) {
 // generations forwarded to was dropped in v23, so it is no longer mapped and
 // the routers in front of the lb interfaces no longer open it.
 func TestVaultMainConnectDnsPortStaysOn4053(t *testing.T) {
-	version := loadSiblingVaultServicesConfig(t, "main").Latest()
+	checkMainConnectDnsPort(t, loadSiblingVaultServicesConfig(t, "main").Latest())
+}
 
+func TestSyntheticMainConnectDnsPortStaysOn4053(t *testing.T) {
+	checkMainConnectDnsPort(t, loadSyntheticMainServicesConfig(t).Latest())
+}
+
+func checkMainConnectDnsPort(t *testing.T, version *ServicesConfigVersion) {
+	t.Helper()
 	udpStreamPortServices := version.Lb.UdpStreamPortServices
 	for _, servicePort := range []int{443, 4053} {
 		if got := udpStreamPortServices[servicePort]; got != "connect" {
@@ -947,6 +1013,74 @@ func TestVaultMainRouterAttachments(t *testing.T) {
 	}
 }
 
+// The derivations TestVaultMainRouterAttachments pins on the production
+// topology, on the synthetic router-safety fixture: the router and gateway
+// names, which gateway is ours, the routers behind each gateway, the fields a
+// router takes from its gateway, the classes, the release and offload
+// defaults, and the lb interface attachments and addresses.
+func TestSyntheticRouterAttachments(t *testing.T) {
+	servicesConfig, err := loadRouterSafetyConfig(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := servicesConfig.RouterNames(); !slices.Equal(got, []string{"r-test-1-1", "r-test-1-2", "r-test-1-3", "r-test-1-gateway-1"}) {
+		t.Fatalf("routers=%v", got)
+	}
+	if got := servicesConfig.GatewayNames(); !slices.Equal(got, []string{"r-test-1-gateway-1", "r-test-1-gateway-2"}) {
+		t.Fatalf("gateways=%v", got)
+	}
+	if !servicesConfig.IsManagedGateway("r-test-1-gateway-1") || servicesConfig.IsManagedGateway("r-test-1-gateway-2") {
+		t.Fatal("only gateway-1 is ours")
+	}
+	if got := servicesConfig.RoutersBehind("r-test-1-gateway-1"); !slices.Equal(got, []string{"r-test-1-1", "r-test-1-2", "r-test-1-3"}) {
+		t.Fatalf("behind gateway-1 = %v", got)
+	}
+	if got := servicesConfig.RoutersBehind("r-test-1-gateway-2"); len(got) != 0 {
+		t.Fatalf("behind gateway-2 = %v", got)
+	}
+	// the derived fields: the routers behind gateway-1 and the gateway router
+	// itself all take them from gateway-1's entry
+	for _, router := range servicesConfig.RouterNames() {
+		routerConfig := servicesConfig.Routers[router]
+		if routerConfig.WanGatewayIpv4 != "203.0.113.1" || routerConfig.WanIpv6Prefix != "2001:db8:10::/48" || routerConfig.WanGatewayIpv6 != "2001:db8:10::1" {
+			t.Errorf("%s derived fields = %+v", router, routerConfig)
+		}
+		if routerConfig.EdgeosRelease != "synthetic" || routerConfig.MasqueradeWanBlock || routerConfig.OffloadsIpv6Forwarding() || !routerConfig.OffloadsIpv4Forwarding() {
+			t.Errorf("%s has unexpected release, nat or offload toggles", router)
+		}
+	}
+	for router, class := range map[string]string{"r-test-1-1": RouterClassEdge, "r-test-1-2": RouterClassEdge, "r-test-1-3": RouterClassLan, "r-test-1-gateway-1": RouterClassGateway} {
+		if got := servicesConfig.Routers[router].GetClass(); got != class {
+			t.Errorf("%s class = %s want %s", router, got, class)
+		}
+	}
+	want := map[string]string{
+		"alpha.example eth0": "r-test-1-1 eth2",
+		"alpha.example eth1": "r-test-1-1 eth3",
+		"bravo.example eth0": "r-test-1-2 eth2",
+	}
+	got := map[string]string{}
+	for host, lbBlocks := range servicesConfig.Latest().Lb.Interfaces {
+		for interfaceName, lbBlock := range lbBlocks {
+			if lbBlock.Router != "" {
+				got[host+" "+interfaceName] = lbBlock.Router + " " + lbBlock.RouterInterface
+			}
+		}
+	}
+	for hostInterface, attachment := range want {
+		if got[hostInterface] != attachment {
+			t.Errorf("%s is attached to %q want %q", hostInterface, got[hostInterface], attachment)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("attachments=%v want exactly the %d interfaces behind the routers", got, len(want))
+	}
+	lbBlock := servicesConfig.Latest().Lb.Interfaces["alpha.example"]["eth0"]
+	if got := []string{lbBlock.Ipv4, lbBlock.Ipv6, strconv.Itoa(lbBlock.GetDnsWeight())}; !slices.Equal(got, []string{"203.0.113.10", "2001:db8:10:1120::2", "100"}) {
+		t.Errorf("alpha.example eth0 = %v", got)
+	}
+}
+
 // The document-level `default_rate_limit` block is parsed. The lb blocks
 // alias it, and a service that runs with no lb in front of it applies the
 // same limits itself (connect/EXTENDER.md 3.L5).
@@ -996,6 +1130,8 @@ versions:
 		!slices.Equal(lbRateLimit.ExcludeSubnets, rateLimit.ExcludeSubnets) {
 		t.Fatalf("lb rate limit = %+v want %+v", lbRateLimit, rateLimit)
 	}
+	// the checks TestVaultMainDefaultRateLimit pins on the production main env
+	checkMainDefaultRateLimit(t, servicesConfig)
 }
 
 // A document with no block falls back to the same defaults an lb block with
@@ -1020,7 +1156,11 @@ func TestServicesConfigDefaultRateLimitFallsBackToTheWarpDefault(t *testing.T) {
 
 // The production block reaches a service that has no lb in front of it.
 func TestVaultMainDefaultRateLimit(t *testing.T) {
-	servicesConfig := loadSiblingVaultServicesConfig(t, "main")
+	checkMainDefaultRateLimit(t, loadSiblingVaultServicesConfig(t, "main"))
+}
+
+func checkMainDefaultRateLimit(t *testing.T, servicesConfig *ServicesConfig) {
+	t.Helper()
 	rateLimit := servicesConfig.DefaultRateLimit
 	if rateLimit == nil {
 		t.Fatal("the main env has no default_rate_limit")

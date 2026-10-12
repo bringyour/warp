@@ -1227,7 +1227,7 @@ func (self *NginxConfig) addNginxConfig() {
             ssl_prefer_server_ciphers on;
             ssl_dhparam /etc/nginx/dhparam.pem; # openssl dhparam -out /etc/nginx/dhparam.pem 4096
             ssl_ciphers EECDH+AESGCM:EDH+AESGCM;
-            ssl_ecdh_curve secp384r1; # Requires nginx >= 1.1.0
+            ssl_ecdh_curve X25519:prime256v1:secp384r1; # Requires nginx >= 1.11.0 for a list
             ssl_session_timeout  10m;
             ssl_session_cache shared:SSL:10m;
             ssl_session_tickets off; # Requires nginx >= 1.5.9

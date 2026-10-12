@@ -1076,9 +1076,14 @@ versions:
 		return strings.Join(configs, "\n")
 	}
 
+	// lag.dev/PLAN.md W2: no service is sent credentialed cross-origin
+	// requests, so not even an exact allowlist permits them
 	exactConfig := generate(baseYaml)
-	if !strings.Contains(exactConfig, "add_header 'Access-Control-Allow-Credentials' 'true' always;") {
-		t.Fatal("exact-origin CORS did not permit credentialed requests")
+	if !strings.Contains(exactConfig, "if ($http_origin = 'https://example.com')") {
+		t.Fatal("exact-origin CORS did not echo the allowlisted origin")
+	}
+	if strings.Contains(exactConfig, "Access-Control-Allow-Credentials") {
+		t.Fatal("exact-origin CORS permitted credentialed requests")
 	}
 	if !strings.Contains(exactConfig, "add_header 'Vary' 'Origin' always;") {
 		t.Fatal("exact-origin CORS did not vary caches by Origin")

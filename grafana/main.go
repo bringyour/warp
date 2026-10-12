@@ -48,6 +48,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -115,6 +116,12 @@ const defaultMinioPort = 23900
 const defaultReplicationFactor = 3
 const defaultRetention = "744h"
 const defaultMimirRetention = "2160h"
+
+// Mimir's per-tenant distributor token bucket defaults
+// (-distributor.ingestion-rate-limit, -distributor.ingestion-burst-size),
+// which the children run with when grafana.yml omits the setting.
+const defaultMimirIngestionRate = 10000
+const defaultMimirIngestionBurstSize = 200000
 const lokiDatasourceUid = "warp-loki"
 const logsDrilldownPluginID = "grafana-lokiexplore-app"
 const logsDrilldownExplorePath = "/a/grafana-lokiexplore-app/explore"
@@ -287,6 +294,16 @@ type MimirConfig struct {
 	// In-memory series per tenant across the cluster, before replication.
 	// Omission keeps Mimir's default; an explicit zero disables this limit.
 	MaxGlobalSeriesPerUser *int `yaml:"max_global_series_per_user,omitempty"`
+	// Tenant samples/s across all distributors. Each distributor admits this
+	// divided by the healthy distributors, and publishers reach the distributor
+	// co-located with their front, so size it for the hottest distributor.
+	// Omission keeps Mimir's 10000 default; the value must be positive.
+	IngestionRate *float64 `yaml:"ingestion_rate,omitempty"`
+	// Token-bucket burst in samples, applied whole on each distributor; it must
+	// exceed the largest single push and be at least the tenant ingestion_rate
+	// (counting Mimir's defaults for an omitted setting). Omission keeps
+	// Mimir's 200000 default.
+	IngestionBurstSize *int `yaml:"ingestion_burst_size,omitempty"`
 	// see LokiConfig.MaxStorage
 	MaxStorage string `yaml:"max_storage,omitempty"`
 	Bucket     string `yaml:"bucket,omitempty"`
@@ -1219,6 +1236,37 @@ func mimirLimitsConfig(settings *MimirConfig) map[string]any {
 			panic(errors.New("mimir.max_global_series_per_user must be non-negative"))
 		}
 		limits["max_global_series_per_user"] = *settings.MaxGlobalSeriesPerUser
+	}
+	if settings.IngestionRate != nil {
+		// zero admits nothing after the first burst and infinity disables the
+		// limit; neither is a deliberate rate
+		rate := *settings.IngestionRate
+		if !(0 < rate) || math.IsInf(rate, 0) {
+			panic(errors.New("mimir.ingestion_rate must be a positive finite number"))
+		}
+		limits["ingestion_rate"] = rate
+	}
+	if settings.IngestionBurstSize != nil {
+		if *settings.IngestionBurstSize <= 0 {
+			panic(errors.New("mimir.ingestion_burst_size must be positive"))
+		}
+		limits["ingestion_burst_size"] = *settings.IngestionBurstSize
+	}
+	// Mimir divides the rate among the healthy distributors but applies the
+	// burst whole on each, and its own burst factor must be at least 1, so a
+	// burst below the tenant rate is never deliberate. Compare the values the
+	// children will run with: raising only the rate past Mimir's default burst
+	// fails here instead of starting children with an inconsistent bucket.
+	effectiveRate := float64(defaultMimirIngestionRate)
+	if settings.IngestionRate != nil {
+		effectiveRate = *settings.IngestionRate
+	}
+	effectiveBurst := defaultMimirIngestionBurstSize
+	if settings.IngestionBurstSize != nil {
+		effectiveBurst = *settings.IngestionBurstSize
+	}
+	if float64(effectiveBurst) < effectiveRate {
+		panic(errors.New("mimir.ingestion_burst_size must be at least mimir.ingestion_rate"))
 	}
 	return limits
 }

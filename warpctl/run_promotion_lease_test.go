@@ -69,7 +69,7 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
-	t.Setenv("WARP_HOME", f.home)
+	setTestWarpHome(t, f.home)
 	oldRun, oldOut, oldQuiet, oldSudo2 := runAndLogFunc, outAndLogFunc, runQuietFunc, sudo2Func
 	sudo2Func = nil
 	runAndLogFunc = f.run

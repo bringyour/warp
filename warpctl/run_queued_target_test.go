@@ -90,7 +90,7 @@ func testRunWorkerQueuedTarget(t *testing.T, control queuedTargetControl) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
-	t.Setenv("WARP_HOME", home)
+	setTestWarpHome(t, home)
 	var selected atomic.Value
 	selected.Store("1.0.0")
 	var reads atomic.Int32

@@ -51,7 +51,7 @@ func syntheticComparisonFiles(t *testing.T, desired *vyos.Config, running *vyos.
 func TestVyosCompareConfigCommandUsesOnlySnapshotFiles(t *testing.T) {
 	config := syntheticComparisonConfig()
 	desiredDir, inDir := syntheticComparisonFiles(t, config, config, config)
-	t.Setenv("WARP_HOME", t.TempDir())
+	setTestWarpHome(t, t.TempDir())
 	oldArgs, oldWriter := os.Args, Out.Writer()
 	defer func() { os.Args = oldArgs; Out.SetOutput(oldWriter) }()
 	var output bytes.Buffer

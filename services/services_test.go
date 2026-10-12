@@ -886,19 +886,23 @@ func TestVaultMainRouterAttachments(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"by-us-fmt-5-edge-0.bringyour.com eno2":         "by-us-fmt-5-2 eth0",
-		"by-us-fmt-5-edge-0.bringyour.com eno3":         "by-us-fmt-5-3 eth0",
-		"by-us-fmt-5-edge-0.bringyour.com eno4":         "by-us-fmt-5-7 eth2",
-		"by-us-fmt-5-edge-1.bringyour.com eno2":         "by-us-fmt-5-6 eth2",
-		"by-us-fmt-5-edge-1.bringyour.com eno3":         "by-us-fmt-5-4 eth0",
-		"by-us-fmt-5-edge-1.bringyour.com eno4":         "by-us-fmt-5-5 eth0",
-		"by-us-fmt-5-edge-3.bringyour.com eno1np0":      "by-us-fmt-5-8 eth8",
-		"by-us-fmt-5-edge-3.bringyour.com eno2np1":      "by-us-fmt-5-8 eth6",
-		"by-us-fmt-5-edge-4.bringyour.com eno3":         "by-us-fmt-5-8 eth7",
-		"by-us-fmt-5-edge-4.bringyour.com eno4":         "by-us-fmt-5-8 eth5",
-		"by-us-fmt-5-edge-5.bringyour.com enp33s0f1np1": "by-us-fmt-5-9 eth3",
-		"fireside.bringyour.com eno1np0":                "by-us-fmt-5-9 eth6",
-		"crisp.bringyour.com eno1np0":                   "by-us-fmt-5-9 eth4",
+		"by-us-fmt-5-edge-0.bringyour.com eno2":    "by-us-fmt-5-2 eth0",
+		"by-us-fmt-5-edge-0.bringyour.com eno3":    "by-us-fmt-5-3 eth0",
+		"by-us-fmt-5-edge-0.bringyour.com eno4":    "by-us-fmt-5-7 eth2",
+		"by-us-fmt-5-edge-1.bringyour.com eno2":    "by-us-fmt-5-6 eth2",
+		"by-us-fmt-5-edge-1.bringyour.com eno3":    "by-us-fmt-5-4 eth0",
+		"by-us-fmt-5-edge-1.bringyour.com eno4":    "by-us-fmt-5-5 eth0",
+		"by-us-fmt-5-edge-3.bringyour.com eno1np0": "by-us-fmt-5-8 eth8",
+		"by-us-fmt-5-edge-3.bringyour.com eno2np1": "by-us-fmt-5-8 eth6",
+		"by-us-fmt-5-edge-4.bringyour.com eno3":    "by-us-fmt-5-8 eth7",
+		"by-us-fmt-5-edge-4.bringyour.com eno4":    "by-us-fmt-5-8 eth5",
+		"fireside.bringyour.com eno1np0":           "by-us-fmt-5-9 eth6",
+		"crisp.bringyour.com eno1np0":              "by-us-fmt-5-9 eth4",
+	}
+	// edge-5 left the lb set in v25 to become the MinIO host, freeing
+	// by-us-fmt-5-9 eth3
+	if _, ok := servicesConfig.Latest().Lb.Interfaces["by-us-fmt-5-edge-5.bringyour.com"]; ok {
+		t.Errorf("by-us-fmt-5-edge-5 still has lb interfaces")
 	}
 	got := map[string]string{}
 	for host, lbBlocks := range servicesConfig.Latest().Lb.Interfaces {

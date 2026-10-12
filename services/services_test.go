@@ -885,13 +885,11 @@ func TestVaultMainRouterAttachments(t *testing.T) {
 			t.Errorf("%s wan_ipv4 = %s want %s", router, got, wan)
 		}
 	}
+	// the interfaces behind a router that runs the generated configuration.
+	// edge-0 and edge-1 sit behind by-us-fmt-5-2 to 5-7, which still run
+	// their legacy configuration, so they stay legacy attachments (below)
+	// until the cutover attaches them
 	want := map[string]string{
-		"by-us-fmt-5-edge-0.bringyour.com eno2":    "by-us-fmt-5-2 eth0",
-		"by-us-fmt-5-edge-0.bringyour.com eno3":    "by-us-fmt-5-3 eth0",
-		"by-us-fmt-5-edge-0.bringyour.com eno4":    "by-us-fmt-5-7 eth2",
-		"by-us-fmt-5-edge-1.bringyour.com eno2":    "by-us-fmt-5-6 eth2",
-		"by-us-fmt-5-edge-1.bringyour.com eno3":    "by-us-fmt-5-4 eth0",
-		"by-us-fmt-5-edge-1.bringyour.com eno4":    "by-us-fmt-5-5 eth0",
 		"by-us-fmt-5-edge-3.bringyour.com eno1np0": "by-us-fmt-5-8 eth8",
 		"by-us-fmt-5-edge-3.bringyour.com eno2np1": "by-us-fmt-5-8 eth6",
 		"by-us-fmt-5-edge-4.bringyour.com eno3":    "by-us-fmt-5-8 eth7",
@@ -918,19 +916,58 @@ func TestVaultMainRouterAttachments(t *testing.T) {
 		}
 	}
 	if len(got) != len(want) {
-		t.Fatalf("attachments=%v want exactly the %d interfaces behind the generated routers", got, len(want))
+		t.Errorf("attachments=%v want exactly the %d interfaces behind the generated routers", got, len(want))
 	}
-	// the hosts' addresses on the legacy routers: the ipv4 dns already names,
-	// the ipv6 from the port /64 and the interface MAC (EUI-64), the 1G links
-	// behind an EdgeRouter 4 weighted 10
+	// the legacy attachments: no router, and an ipv6 only where the legacy
+	// router advertises one, from its pre-convention /64 (the bare router id
+	// in the fourth hextet); by-us-fmt-5-3 and 5-5 advertise none. A
+	// convention address here would name an address no host holds, which dns
+	// would publish and the edge-ipv6 signal would page on.
+	legacy := map[string]string{
+		"by-us-fmt-5-edge-0.bringyour.com eno2": "by-us-fmt-5-2",
+		"by-us-fmt-5-edge-0.bringyour.com eno3": "by-us-fmt-5-3",
+		"by-us-fmt-5-edge-0.bringyour.com eno4": "by-us-fmt-5-7",
+		"by-us-fmt-5-edge-1.bringyour.com eno2": "by-us-fmt-5-6",
+		"by-us-fmt-5-edge-1.bringyour.com eno3": "by-us-fmt-5-4",
+		"by-us-fmt-5-edge-1.bringyour.com eno4": "by-us-fmt-5-5",
+	}
+	for hostInterface, router := range legacy {
+		host, interfaceName, _ := strings.Cut(hostInterface, " ")
+		lbBlock := servicesConfig.Latest().Lb.Interfaces[host][interfaceName]
+		if lbBlock == nil {
+			t.Errorf("%s is not an lb interface", hostInterface)
+			continue
+		}
+		if lbBlock.Router != "" || lbBlock.RouterInterface != "" {
+			t.Errorf("%s is attached to %s %s, but %s runs its legacy configuration", hostInterface, lbBlock.Router, lbBlock.RouterInterface, router)
+		}
+		if lbBlock.Ipv6 == "" {
+			continue
+		}
+		legacyPrefix, err := RouterLegacyIpv6Prefix(router, servicesConfig.Routers[router])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ipv6, err := netip.ParseAddr(lbBlock.Ipv6); err != nil || !legacyPrefix.Contains(ipv6) {
+			t.Errorf("%s ipv6 %s is outside %s, the /64 the legacy %s advertises", hostInterface, lbBlock.Ipv6, legacyPrefix, router)
+		}
+	}
+	// the addresses the hosts hold: the ipv4 dns names (a legacy router
+	// holds it in front of the host), the ipv6 by slaac from the /64 of the
+	// port and the interface MAC (EUI-64), and the main-lb weights by lb
+	// capacity approved on 2026-10-11: 150 on edge-0 eno4 and edge-1 eno2,
+	// 50 on edge-3 and edge-4, 10 on the 1G links behind an EdgeRouter 4
 	addresses := map[string][]string{
-		"by-us-fmt-5-edge-0.bringyour.com eno2":    {"65.19.157.62", "2001:470:173:5200:e643:4bff:fe23:a341", "10"},
-		"by-us-fmt-5-edge-0.bringyour.com eno3":    {"65.19.157.42", "2001:470:173:5300:e643:4bff:fe23:a342", "10"},
-		"by-us-fmt-5-edge-0.bringyour.com eno4":    {"65.49.70.71", "2001:470:99:5720:e643:4bff:fe23:a343", "100"},
-		"by-us-fmt-5-edge-1.bringyour.com eno2":    {"65.49.70.70", "2001:470:99:5620:e643:4bff:fec3:8446", "100"},
-		"by-us-fmt-5-edge-1.bringyour.com eno3":    {"65.19.157.41", "2001:470:173:5400:e643:4bff:fec3:8464", "10"},
-		"by-us-fmt-5-edge-1.bringyour.com eno4":    {"65.19.157.40", "2001:470:173:5500:e643:4bff:fec3:8465", "10"},
-		"by-us-fmt-5-edge-3.bringyour.com eno1np0": {"65.49.70.84", "2001:470:99:5880:e643:4bff:fe94:e380", "100"},
+		"by-us-fmt-5-edge-0.bringyour.com eno2":    {"65.19.157.62", "2001:470:173:52:e643:4bff:fe23:a341", "10"},
+		"by-us-fmt-5-edge-0.bringyour.com eno3":    {"65.19.157.42", "", "10"},
+		"by-us-fmt-5-edge-0.bringyour.com eno4":    {"65.49.70.71", "2001:470:99:57:e643:4bff:fe23:a343", "150"},
+		"by-us-fmt-5-edge-1.bringyour.com eno2":    {"65.49.70.70", "2001:470:99:56:e643:4bff:fec3:8446", "150"},
+		"by-us-fmt-5-edge-1.bringyour.com eno3":    {"65.19.157.41", "2001:470:173:54:e643:4bff:fec3:8464", "10"},
+		"by-us-fmt-5-edge-1.bringyour.com eno4":    {"65.19.157.40", "", "10"},
+		"by-us-fmt-5-edge-3.bringyour.com eno1np0": {"65.49.70.84", "2001:470:99:5880:e643:4bff:fe94:e380", "50"},
+		"by-us-fmt-5-edge-3.bringyour.com eno2np1": {"65.49.70.85", "2001:470:99:5860:e643:4bff:fe94:e381", "50"},
+		"by-us-fmt-5-edge-4.bringyour.com eno3":    {"65.49.70.82", "2001:470:99:5870:e643:4bff:fe89:2bca", "50"},
+		"by-us-fmt-5-edge-4.bringyour.com eno4":    {"65.49.70.83", "2001:470:99:5850:e643:4bff:fe89:2bcb", "50"},
 	}
 	for hostInterface, wantAddresses := range addresses {
 		host, interfaceName, _ := strings.Cut(hostInterface, " ")

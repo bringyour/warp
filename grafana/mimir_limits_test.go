@@ -97,3 +97,120 @@ func TestMimirLimitsConfigRejectsNegativeSeriesLimit(t *testing.T) {
 	}()
 	mimirLimitsConfig(config.Mimir)
 }
+
+// renderedIngestionLimits renders an operator grafana.yml through the child
+// limits renderer and reads back only the distributor token-bucket fields.
+func renderedIngestionLimits(t *testing.T, configYAML string) (rate *float64, burst *int) {
+	t.Helper()
+	var config GrafanaConfig
+	if err := yaml.Unmarshal([]byte(configYAML), &config); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := yaml.Marshal(map[string]any{"limits": mimirLimitsConfig(config.Mimir)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Limits struct {
+			IngestionRate      *float64 `yaml:"ingestion_rate"`
+			IngestionBurstSize *int     `yaml:"ingestion_burst_size"`
+		} `yaml:"limits"`
+	}
+	if err := yaml.Unmarshal(rendered, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	return parsed.Limits.IngestionRate, parsed.Limits.IngestionBurstSize
+}
+
+// Mimir admits ingestion_rate divided by the healthy distributors on each
+// distributor, and the fronts route publishers to co-located distributors, so
+// the hottest distributor, not the fleet sum, decides discards. On 2026-10-12
+// the six-replica fleet attempted about 10300 samples/s against the 10000
+// default (1667/s per distributor) while each edge distributor received
+// 1800-2000/s and discarded the excess as rate_limited. grafana.yml must be
+// able to raise the tenant rate and burst; before this, the renderer dropped
+// both settings and every child kept Mimir's default.
+func TestMimirLimitsConfigIngestionRate(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configYAML string
+		wantRate   float64
+		hasRate    bool
+		wantBurst  int
+		hasBurst   bool
+	}{
+		{
+			name:       "omission keeps the mimir defaults",
+			configYAML: "mimir:\n  max_global_series_per_user: 2000000\n",
+		},
+		{
+			name:       "rate only keeps the default burst",
+			configYAML: "mimir:\n  ingestion_rate: 20000\n",
+			wantRate:   20000,
+			hasRate:    true,
+		},
+		{
+			name:       "fractional rate",
+			configYAML: "mimir:\n  ingestion_rate: 12500.5\n",
+			wantRate:   12500.5,
+			hasRate:    true,
+		},
+		{
+			name:       "rate and burst",
+			configYAML: "mimir:\n  ingestion_rate: 20000\n  ingestion_burst_size: 400000\n",
+			wantRate:   20000,
+			hasRate:    true,
+			wantBurst:  400000,
+			hasBurst:   true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rate, burst := renderedIngestionLimits(t, test.configYAML)
+			if (rate != nil) != test.hasRate {
+				t.Fatalf("ingestion_rate present = %t, want %t", rate != nil, test.hasRate)
+			}
+			if test.hasRate && *rate != test.wantRate {
+				t.Fatalf("ingestion_rate = %v, want %v", *rate, test.wantRate)
+			}
+			if (burst != nil) != test.hasBurst {
+				t.Fatalf("ingestion_burst_size present = %t, want %t", burst != nil, test.hasBurst)
+			}
+			if test.hasBurst && *burst != test.wantBurst {
+				t.Fatalf("ingestion_burst_size = %d, want %d", *burst, test.wantBurst)
+			}
+		})
+	}
+}
+
+// A zero rate admits nothing after the first burst, and a non-finite or
+// non-positive value is never a deliberate setting: fail the render instead of
+// starting a child that silently drops every push.
+func TestMimirLimitsConfigRejectsInvalidIngestionLimits(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configYAML string
+		wantPanic  string
+	}{
+		{"zero rate", "mimir:\n  ingestion_rate: 0\n", "mimir.ingestion_rate must be a positive finite number"},
+		{"negative rate", "mimir:\n  ingestion_rate: -1\n", "mimir.ingestion_rate must be a positive finite number"},
+		{"infinite rate", "mimir:\n  ingestion_rate: .inf\n", "mimir.ingestion_rate must be a positive finite number"},
+		{"not a number rate", "mimir:\n  ingestion_rate: .nan\n", "mimir.ingestion_rate must be a positive finite number"},
+		{"zero burst", "mimir:\n  ingestion_burst_size: 0\n", "mimir.ingestion_burst_size must be positive"},
+		{"negative burst", "mimir:\n  ingestion_burst_size: -5\n", "mimir.ingestion_burst_size must be positive"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var config GrafanaConfig
+			if err := yaml.Unmarshal([]byte(test.configYAML), &config); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				got := recover()
+				err, ok := got.(error)
+				if !ok || err.Error() != test.wantPanic {
+					t.Fatalf("panic = %v, want %q", got, test.wantPanic)
+				}
+			}()
+			mimirLimitsConfig(config.Mimir)
+		})
+	}
+}

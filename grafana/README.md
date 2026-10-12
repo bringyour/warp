@@ -159,6 +159,12 @@ docker systemd drop-ins on the hosts.
   Main sets it to 2,000,000; with six writable ingesters and replication factor
   3 this corresponds to 1,000,000 series per ingester. Higher actual series
   counts consume more ingester memory; check host headroom during rollout.
+  `mimir.ingestion_rate` (samples/s, default 10000) and
+  `mimir.ingestion_burst_size` (default 200000) set the tenant's distributor
+  token bucket. Each distributor admits the rate divided by the healthy
+  distributors, and publishers reach the distributor co-located with their
+  front, so size the rate for the busiest distributor plus a rollout overlap,
+  not for the fleet sum. Requests over it are discarded as `rate_limited`.
 - **Retention and storage caps**: `loki.retention` in grafana.yml (default
   744h = 31 days) is enforced by the loki compactor, and
   `mimir.retention` (default 2160h) by the mimir compactor — retention is

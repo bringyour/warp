@@ -85,14 +85,31 @@ func TestTransparentVersionListingDoesNotPollMissingLbRoute(t *testing.T) {
 	}
 }
 
+// The production poller is real HTTPS to the env's LB and the production wait
+// is a real sleep, so a regression past the transparent check is counted here
+// rather than sent to https://test-lb.example.com.
 func TestTransparentOnlyOlderSamplingFailsClosed(t *testing.T) {
 	env := setupTransparentStatusTestVault(t)
-	versions, err := sampleBlockCurrentVersions(env, "svc-direct", "g1")
+	attempts := 0
+	waits := 0
+	versions, err := sampleBlockCurrentVersionsWith(
+		env,
+		"svc-direct",
+		func(string, string, int, []string) (map[semver.Version]float32, map[semver.Version]float32, map[string]int) {
+			attempts += 1
+			return nil, nil, map[string]int{}
+		},
+		func(time.Duration) { waits += 1 },
+		"g1",
+	)
 	if err == nil || !strings.Contains(err.Error(), "transparent") {
 		t.Fatalf("transparent current-version sampling error = %v", err)
 	}
 	if versions != nil {
 		t.Fatalf("transparent current-version sampling = %v, want nil", versions)
+	}
+	if attempts != 0 || waits != 0 {
+		t.Fatalf("transparent current-version sampling: attempts=%d waits=%d, want 0 and 0", attempts, waits)
 	}
 }
 

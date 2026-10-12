@@ -125,10 +125,13 @@ func testRunWorkerQueuedTarget(t *testing.T, control queuedTargetControl) {
 	if err := os.WriteFile(awsEmpty, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// An inherited AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true would drop the
+	// loopback endpoint and send these reads to DynamoDB in us-west-1.
 	for key, value := range map[string]string{
 		"AWS_ACCESS_KEY_ID": "fixture", "AWS_SECRET_ACCESS_KEY": "fixture", "AWS_SESSION_TOKEN": "",
 		"AWS_PROFILE": "", "AWS_SHARED_CREDENTIALS_FILE": awsEmpty, "AWS_CONFIG_FILE": awsEmpty,
 		"AWS_EC2_METADATA_DISABLED": "true", "AWS_ENDPOINT_URL_DYNAMODB": selector.URL,
+		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "",
 	} {
 		t.Setenv(key, value)
 	}

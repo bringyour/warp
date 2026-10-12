@@ -145,8 +145,8 @@ func TestMimirLimitsConfigIngestionRate(t *testing.T) {
 		},
 		{
 			name:       "rate only keeps the default burst",
-			configYAML: "mimir:\n  ingestion_rate: 20000\n",
-			wantRate:   20000,
+			configYAML: "mimir:\n  ingestion_rate: 64000\n",
+			wantRate:   64000,
 			hasRate:    true,
 		},
 		{
@@ -156,10 +156,26 @@ func TestMimirLimitsConfigIngestionRate(t *testing.T) {
 			hasRate:    true,
 		},
 		{
+			// Main's setting from 2026-10-12: 64000/s, a 10667/s share on each of
+			// six distributors, with Mimir's default 20 s burst-to-rate proportion
 			name:       "rate and burst",
-			configYAML: "mimir:\n  ingestion_rate: 20000\n  ingestion_burst_size: 400000\n",
-			wantRate:   20000,
+			configYAML: "mimir:\n  max_global_series_per_user: 2000000\n  ingestion_rate: 64000\n  ingestion_burst_size: 1280000\n",
+			wantRate:   64000,
 			hasRate:    true,
+			wantBurst:  1280000,
+			hasBurst:   true,
+		},
+		{
+			name:       "burst equal to the rate",
+			configYAML: "mimir:\n  ingestion_rate: 64000\n  ingestion_burst_size: 64000\n",
+			wantRate:   64000,
+			hasRate:    true,
+			wantBurst:  64000,
+			hasBurst:   true,
+		},
+		{
+			name:       "burst only, above the default rate",
+			configYAML: "mimir:\n  ingestion_burst_size: 400000\n",
 			wantBurst:  400000,
 			hasBurst:   true,
 		},
@@ -208,6 +224,39 @@ func TestMimirLimitsConfigRejectsInvalidIngestionLimits(t *testing.T) {
 				err, ok := got.(error)
 				if !ok || err.Error() != test.wantPanic {
 					t.Fatalf("panic = %v, want %q", got, test.wantPanic)
+				}
+			}()
+			mimirLimitsConfig(config.Mimir)
+		})
+	}
+}
+
+// Mimir divides ingestion_rate among the healthy distributors but applies
+// ingestion_burst_size whole on each, and its burst factor must be at least 1:
+// the burst must be at least the tenant rate. Raising only the rate past the
+// 200000 default burst, or setting a burst below the rate the children run
+// with, used to render a bucket shallower than one second of the tenant rate.
+// The children's effective values, defaults included, are what is compared.
+func TestMimirLimitsConfigRejectsBurstBelowRate(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configYAML string
+	}{
+		{"burst below the rate", "mimir:\n  ingestion_rate: 64000\n  ingestion_burst_size: 63999\n"},
+		{"rate above the default burst", "mimir:\n  ingestion_rate: 200001\n"},
+		{"burst below the default rate", "mimir:\n  ingestion_burst_size: 9999\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var config GrafanaConfig
+			if err := yaml.Unmarshal([]byte(test.configYAML), &config); err != nil {
+				t.Fatal(err)
+			}
+			const wantPanic = "mimir.ingestion_burst_size must be at least mimir.ingestion_rate"
+			defer func() {
+				got := recover()
+				err, ok := got.(error)
+				if !ok || err.Error() != wantPanic {
+					t.Fatalf("panic = %v, want %q", got, wantPanic)
 				}
 			}()
 			mimirLimitsConfig(config.Mimir)

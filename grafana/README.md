@@ -165,6 +165,13 @@ docker systemd drop-ins on the hosts.
   distributors, and publishers reach the distributor co-located with their
   front, so size the rate for the busiest distributor plus a rollout overlap,
   not for the fleet sum. Requests over it are discarded as `rate_limited`.
+  The burst applies whole on each distributor and must be at least the rate
+  (Mimir's burst factor is likewise at least 1); the render fails otherwise,
+  counting Mimir's default for an omitted setting. Main sets 64000 samples/s
+  (10667/s per distributor across six) with a 1,280,000 burst, Mimir's default
+  20 s burst-to-rate proportion. The rate and the series limit take effect
+  only when the children restart, so redeploy the grafana block after a
+  config push.
 - **Retention and storage caps**: `loki.retention` in grafana.yml (default
   744h = 31 days) is enforced by the loki compactor, and
   `mimir.retention` (default 2160h) by the mimir compactor — retention is

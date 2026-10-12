@@ -116,6 +116,12 @@ const defaultMinioPort = 23900
 const defaultReplicationFactor = 3
 const defaultRetention = "744h"
 const defaultMimirRetention = "2160h"
+
+// Mimir's per-tenant distributor token bucket defaults
+// (-distributor.ingestion-rate-limit, -distributor.ingestion-burst-size),
+// which the children run with when grafana.yml omits the setting.
+const defaultMimirIngestionRate = 10000
+const defaultMimirIngestionBurstSize = 200000
 const lokiDatasourceUid = "warp-loki"
 const logsDrilldownPluginID = "grafana-lokiexplore-app"
 const logsDrilldownExplorePath = "/a/grafana-lokiexplore-app/explore"
@@ -294,7 +300,9 @@ type MimirConfig struct {
 	// Omission keeps Mimir's 10000 default; the value must be positive.
 	IngestionRate *float64 `yaml:"ingestion_rate,omitempty"`
 	// Token-bucket burst in samples, applied whole on each distributor; it must
-	// exceed the largest single push. Omission keeps Mimir's 200000 default.
+	// exceed the largest single push and be at least the tenant ingestion_rate
+	// (counting Mimir's defaults for an omitted setting). Omission keeps
+	// Mimir's 200000 default.
 	IngestionBurstSize *int `yaml:"ingestion_burst_size,omitempty"`
 	// see LokiConfig.MaxStorage
 	MaxStorage string `yaml:"max_storage,omitempty"`
@@ -1243,6 +1251,22 @@ func mimirLimitsConfig(settings *MimirConfig) map[string]any {
 			panic(errors.New("mimir.ingestion_burst_size must be positive"))
 		}
 		limits["ingestion_burst_size"] = *settings.IngestionBurstSize
+	}
+	// Mimir divides the rate among the healthy distributors but applies the
+	// burst whole on each, and its own burst factor must be at least 1, so a
+	// burst below the tenant rate is never deliberate. Compare the values the
+	// children will run with: raising only the rate past Mimir's default burst
+	// fails here instead of starting children with an inconsistent bucket.
+	effectiveRate := float64(defaultMimirIngestionRate)
+	if settings.IngestionRate != nil {
+		effectiveRate = *settings.IngestionRate
+	}
+	effectiveBurst := defaultMimirIngestionBurstSize
+	if settings.IngestionBurstSize != nil {
+		effectiveBurst = *settings.IngestionBurstSize
+	}
+	if float64(effectiveBurst) < effectiveRate {
+		panic(errors.New("mimir.ingestion_burst_size must be at least mimir.ingestion_rate"))
 	}
 	return limits
 }

@@ -39,7 +39,7 @@ func TestVyosDesiredSnapshotIgnoresMutableInputAuthority(t *testing.T) {
 	writeSyntheticMigrationConfig(t, desiredDir, vyosConfigFileName("synthetic-router"), desired)
 	// No services or settings exist here. The actual command must not reload
 	// either authority after the desired file has been rendered.
-	t.Setenv("WARP_HOME", t.TempDir())
+	setTestWarpHome(t, t.TempDir())
 	vyosCreateMigration(docopt.Opts{
 		"<env>": "synthetic", "<router>": "synthetic-router", "--in": liveDir,
 		"--desired": desiredDir, "--out": outDir,

@@ -39,6 +39,15 @@ type portAssignmentKey struct {
 	port    int
 }
 
+// setTestWarpHome points WARP_HOME and WARP_VERSION_HOME at one temp home.
+// Setting only WARP_HOME leaves the caller's WARP_VERSION_HOME in place, so
+// getWarpState and setWarpState would use that real version.json.
+func setTestWarpHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("WARP_HOME", home)
+	t.Setenv("WARP_VERSION_HOME", home)
+}
+
 func setupTestVault(t *testing.T, servicesYaml []byte) string {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -54,7 +63,7 @@ func setupTestVault(t *testing.T, servicesYaml []byte) string {
 	if err := os.WriteFile(filepath.Join(vaultDir, "services.yml"), servicesYaml, 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("WARP_HOME", warpHome)
+	setTestWarpHome(t, warpHome)
 	return "test"
 }
 
@@ -136,7 +145,7 @@ func setupTestVaultWithTLS(t *testing.T, servicesYaml []byte) (env string, vault
 	generateTestTLSFiles(t, tlsDir, "example.com", true)
 	generateTestTLSFiles(t, tlsDir, "example.com", false)
 
-	t.Setenv("WARP_HOME", warpHome)
+	setTestWarpHome(t, warpHome)
 	return "test", vaultDir
 }
 

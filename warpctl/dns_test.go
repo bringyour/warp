@@ -732,7 +732,7 @@ func TestDnsCloudflareTokenSources(t *testing.T) {
 	if _, err := cloudflareToken(""); err == nil {
 		t.Fatal("no token source must be an error")
 	}
-	t.Setenv("WARP_HOME", dir)
+	setTestWarpHome(t, dir)
 	if got := defaultCloudflareTokenFile(); got != "" {
 		t.Fatalf("default token file = %q without root/servers/cloudflare", got)
 	}

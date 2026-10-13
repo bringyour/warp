@@ -1271,17 +1271,16 @@ func mimirLimitsConfig(settings *MimirConfig) map[string]any {
 	return limits
 }
 
-func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSettings *HostSettings, ringHosts []string, grafanaConfig *GrafanaConfig) (string, ringProxyPorts) {
+// mimirConfig builds the Mimir child configuration document. The child listens
+// on the warp-allocated internal ring ports and advertises the fixed external
+// ports that the front proxies (see renderLokiConfig).
+func mimirConfig(host string, lanIp string, mimirHttpPort int, grpcListenPort int, gossipBindPort int, hostSettings *HostSettings, ringHosts []string, grafanaConfig *GrafanaConfig) map[string]any {
 	mimirSettings := grafanaConfig.Mimir
 	if mimirSettings == nil {
 		mimirSettings = &MimirConfig{}
 	}
-	// see renderLokiConfig: ring ports are the named constants, declared in
-	// services.yml, validated against WARP_PORTS (no silent default).
 	grpcPort := defaultMimirGrpcPort
 	gossipPort := defaultMimirGossipPort
-	grpcListenPort := requireServiceHostPort(grpcPort)
-	gossipBindPort := requireServiceHostPort(gossipPort)
 	replicationFactor := mimirSettings.ReplicationFactor
 	if replicationFactor == 0 {
 		replicationFactor = defaultReplicationFactor
@@ -1295,7 +1294,7 @@ func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSetting
 
 	joinMembers := ringJoinMembers(hostSettings, ringHosts, gossipPort)
 
-	mimirConfig := map[string]any{
+	return map[string]any{
 		"target":               "all",
 		"multitenancy_enabled": false,
 		"usage_stats": map[string]any{
@@ -1401,8 +1400,17 @@ func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSetting
 			},
 		},
 	}
+}
 
-	mimirConfigYaml, err := yaml.Marshal(mimirConfig)
+func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSettings *HostSettings, ringHosts []string, grafanaConfig *GrafanaConfig) (string, ringProxyPorts) {
+	// see renderLokiConfig: ring ports are the named constants, declared in
+	// services.yml, validated against WARP_PORTS (no silent default).
+	grpcPort := defaultMimirGrpcPort
+	gossipPort := defaultMimirGossipPort
+	grpcListenPort := requireServiceHostPort(grpcPort)
+	gossipBindPort := requireServiceHostPort(gossipPort)
+
+	mimirConfigYaml, err := yaml.Marshal(mimirConfig(host, lanIp, mimirHttpPort, grpcListenPort, gossipBindPort, hostSettings, ringHosts, grafanaConfig))
 	if err != nil {
 		panic(err)
 	}

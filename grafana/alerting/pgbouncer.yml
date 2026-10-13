@@ -1,0 +1,250 @@
+# pgbouncer pool alert rules, file provisioned into grafana unified alerting
+# (written to <runDir>/provisioning/alerting by main.go at container start;
+# grafana reads provisioning/alerting/*.yml at startup).
+#
+# the rules query the provisioned warp-mimir datasource against the series of
+# pgbouncer-pool-exporter on the main database host (xops playbook-dbs.yml),
+# shipped by fluent-bit with labels env, host, job=pgbouncer, and per pool
+# pgbouncer=<instance 1..32>, database. On 2026-10-12 most of the 32 pools
+# held thousands of queued clients and no server for minutes (19:36Z-20:07Z
+# and 21:10Z-21:17Z) while postgres stayed up, and nothing alerted.
+#
+# only rules are provisioned here: contact points and notification policies
+# are managed in the grafana ui (state lives in the env postgres). rules fire
+# with a severity label (page | warn) for the operator to route on.
+# file provisioned rules are read only in the ui; edit this file and redeploy.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: pgbouncer-fast
+    folder: urnetwork alerts
+    interval: 30s
+    rules:
+      # clients queued and no server that can run a query, for longer than a
+      # healthy pool's first login. a starved pool shows it on every reading,
+      # so pgbouncer_pool_starved_seconds only grows until it has a server.
+      - uid: pgbouncer-pool-starved
+        title: PgBouncerPoolStarved
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env, host, pgbouncer) (pgbouncer_pool_starved_seconds)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 15
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # pgbouncer-pool-exporter-down covers a missing series
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels:
+          severity: page
+        annotations:
+          summary: PgBouncer pool {{ $labels.host }} pgbouncer@{{ $labels.pgbouncer }} has had clients queued and no server for {{ $values.A }}s. Fix with SET query_wait_timeout on its admin console or restart that instance.
+        isPaused: false
+      # the exporter, fluent-bit or an instance's admin console is gone. a
+      # console that stops answering is also what a blocked event loop looks
+      # like.
+      - uid: pgbouncer-pool-exporter-down
+        title: PgBouncerPoolExporterDown
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: min by (env, host) (pgbouncer_up)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # a missing pgbouncer_up series means the exporter, scraping, or the
+        # metrics pipeline has disappeared; the starved alert is blind then
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warn
+        annotations:
+          summary: PgBouncer pool metrics from {{ $labels.host }} are missing or an admin console stopped answering.
+        isPaused: false
+  - orgId: 1
+    name: pgbouncer
+    folder: urnetwork alerts
+    interval: 1m
+    rules:
+      # the oldest queued client has waited most of query_wait_timeout (4 s
+      # once deployed) for a minute: the pool keeps servers but cannot keep up
+      - uid: pgbouncer-pool-queue-wait-high
+        title: PgBouncerPoolQueueWaitHigh
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env, host, pgbouncer) (max_over_time(pgbouncer_pool_maxwait_seconds[1m]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 3
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warn
+        annotations:
+          summary: PgBouncer pool {{ $labels.host }} pgbouncer@{{ $labels.pgbouncer }} queues clients for {{ $values.A }}s.
+        isPaused: false
+      # available before the exporter: postgres_exporter's backend count for
+      # the application database fell from 710-760 to 157 within 30 s at
+      # 21:10Z and stayed there until the pools were fixed at 21:17Z. coarse:
+      # it fires only once most pools are empty.
+      - uid: postgres-application-backends-collapsed
+        title: PostgresApplicationBackendsCollapsed
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: min by (env, host) (pg_stat_database_numbackends{job="postgres", datname="bringyour"})
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 300
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: PostgreSQL on {{ $labels.host }} has {{ $values.A }} bringyour backends (normally ~700); PgBouncer pools may be empty.
+        isPaused: false

@@ -3,14 +3,21 @@
 #
 # the rules query the node_exporter_metrics filesystem series that fluent-bit
 # remote-writes from every host (labels env/host/job=node, see the fluent-bit
-# templates in xops). /mnt/data is the data disk: on by-us-fmt-5-edge-6 one
-# zfs pool holds the redis cluster's dumps, the redis backups and the minio
-# store behind loki, mimir and the server blob bucket. a full pool stops every
-# minio write ("minimum free drive threshold"), the redis backups and redis
-# saves at once, and it filled unnoticed twice in october 2026.
+# templates in xops). each data disk is watched on its own mountpoint:
+# - /mnt/data, the zfs pool of every redis node host (by-us-fmt-5-edge-6 and
+#   by-us-fmt-5-edge-5): the redis cluster's dumps and saves, and on edge-6 the
+#   redis backups. edge-6's pool also held the minio store until october 2026,
+#   when a full pool stopped every minio write, the redis backups and redis
+#   saves at once; it filled unnoticed twice that month.
+# - /mnt/blob1 .. /mnt/blob4 on by-us-fmt-5-edge-5, the xfs drives of the one
+#   minio erasure set now behind loki, mimir and the server blob bucket. minio
+#   fails every write once one drive of the set is full ("minimum free drive
+#   threshold"), so each drive alerts by itself.
 #
-# warn at 15% free leaves about a day at the loki ingest seen in october; page
-# at 5% leaves hours. alert exprs carry no env filter, as in redis-cluster.yml.
+# warn at 15% free left about a day at the loki ingest seen on edge-6's pool in
+# october. on a minio drive it leaves more than a week at the ~45 GiB/day each
+# drive lost after the move, and page at 5% about four days. alert exprs carry
+# no env filter, as in redis-cluster.yml.
 apiVersion: 1
 groups:
   - orgId: 1
@@ -27,7 +34,7 @@ groups:
             datasourceUid: warp-mimir
             model:
               editorMode: code
-              expr: 'max by (env, host) (node_filesystem_avail_bytes{mountpoint="/mnt/data"}) / max by (env, host) (node_filesystem_size_bytes{mountpoint="/mnt/data"} > 0)'
+              expr: 'max by (env, host, mountpoint) (node_filesystem_avail_bytes{mountpoint=~"/mnt/data|/mnt/blob[0-9]+"}) / max by (env, host, mountpoint) (node_filesystem_size_bytes{mountpoint=~"/mnt/data|/mnt/blob[0-9]+"} > 0)'
               instant: true
               range: false
               intervalMs: 1000
@@ -53,7 +60,7 @@ groups:
         for: 10m
         labels: {service: data-disk, severity: warn}
         annotations:
-          summary: '{{ $labels.host }} /mnt/data is below 15% free (free fraction {{ $values.A }}).'
+          summary: '{{ $labels.host }} {{ $labels.mountpoint }} is below 15% free (free fraction {{ $values.A }}).'
         isPaused: false
 
       - uid: data-disk-critical
@@ -65,7 +72,7 @@ groups:
             datasourceUid: warp-mimir
             model:
               editorMode: code
-              expr: 'max by (env, host) (node_filesystem_avail_bytes{mountpoint="/mnt/data"}) / max by (env, host) (node_filesystem_size_bytes{mountpoint="/mnt/data"} > 0)'
+              expr: 'max by (env, host, mountpoint) (node_filesystem_avail_bytes{mountpoint=~"/mnt/data|/mnt/blob[0-9]+"}) / max by (env, host, mountpoint) (node_filesystem_size_bytes{mountpoint=~"/mnt/data|/mnt/blob[0-9]+"} > 0)'
               instant: true
               range: false
               intervalMs: 1000
@@ -91,11 +98,14 @@ groups:
         for: 5m
         labels: {service: data-disk, severity: page}
         annotations:
-          summary: '{{ $labels.host }} /mnt/data is below 5% free (free fraction {{ $values.A }}); minio, redis saves and backups stop when it fills.'
+          summary: '{{ $labels.host }} {{ $labels.mountpoint }} is below 5% free (free fraction {{ $values.A }}); a full minio drive stops every minio write, a full /mnt/data the redis saves and backups.'
         isPaused: false
 
-      # the two rules above only see hosts that report the series, so a silent
-      # edge-6 shipper would hide the disk that matters most. fail closed on it.
+      # the two rules above only see disks that report the series, so a silent
+      # shipper or an unmounted drive would hide the disks that matter most.
+      # fail closed on each: both redis pools and the four minio drives. the
+      # uid predates edge-5's disks and is kept so a provisioned copy of the
+      # rule updates in place.
       - uid: data-disk-edge-6-telemetry-missing
         title: DataDiskTelemetryMissing
         condition: B
@@ -105,7 +115,13 @@ groups:
             datasourceUid: warp-mimir
             model:
               editorMode: code
-              expr: 'absent(node_filesystem_avail_bytes{env="main",host="by-us-fmt-5-edge-6",mountpoint="/mnt/data"})'
+              expr: >-
+                absent(node_filesystem_avail_bytes{env="main",host="by-us-fmt-5-edge-6",mountpoint="/mnt/data"})
+                or absent(node_filesystem_avail_bytes{env="main",host="by-us-fmt-5-edge-5",mountpoint="/mnt/data"})
+                or absent(node_filesystem_avail_bytes{env="main",host="by-us-fmt-5-edge-5",mountpoint="/mnt/blob1"})
+                or absent(node_filesystem_avail_bytes{env="main",host="by-us-fmt-5-edge-5",mountpoint="/mnt/blob2"})
+                or absent(node_filesystem_avail_bytes{env="main",host="by-us-fmt-5-edge-5",mountpoint="/mnt/blob3"})
+                or absent(node_filesystem_avail_bytes{env="main",host="by-us-fmt-5-edge-5",mountpoint="/mnt/blob4"})
               instant: true
               range: false
               intervalMs: 1000
@@ -131,5 +147,5 @@ groups:
         for: 15m
         labels: {service: data-disk, severity: warn}
         annotations:
-          summary: by-us-fmt-5-edge-6 has reported no /mnt/data free space for 15 minutes.
+          summary: '{{ $labels.host }} has reported no {{ $labels.mountpoint }} free space for 15 minutes.'
         isPaused: false

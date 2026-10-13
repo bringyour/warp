@@ -1,0 +1,597 @@
+# SN25 validator rules on the gauges sn-validator-health.timer publishes from
+# snow (xops main/ansible/playbook-validator-health.yml; the gauge table is in
+# xops main/ansible/SN-MAINNET-VALIDATOR.md, "Health metrics"). Fluent Bit
+# ships them with env=main, host=snow and job=sn-validator.
+#
+# Telemetry, progress, unit and weight rules alert on missing data. Rules on
+# gauges that are absent by design while a source is not current resolve on
+# missing data instead, because the progress and stale rules cover that.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: sn-validator
+    folder: urnetwork alerts
+    interval: 1m
+    rules:
+      # The timer, its unit, Fluent Bit or the push to Mimir stopped. Missing data alerts too.
+      - uid: sn-validator-health-stale
+        title: SnValidatorHealthStale
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'time() - max(urnetwork_sn_validator_sample_timestamp_seconds{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [180], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "Snow has published no validator health sample for over three minutes; every other SN25 validator alert is blind."
+        isPaused: false
+
+      # The validator process has stopped publishing, which is how a dead or wedged process looks.
+      - uid: sn-validator-progress-down
+        title: SnValidatorProgressDown
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'min(urnetwork_sn_validator_progress_ok{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [1], type: lt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        labels: {service: sn-validator, severity: page}
+        annotations:
+          summary: "The SN25 validator's progress file is missing, invalid or more than two minutes old."
+        isPaused: false
+
+      # One panic restart takes about 30 seconds and does not reach this hold.
+      - uid: sn-validator-unit-inactive
+        title: SnValidatorUnitInactive
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'min(urnetwork_sn_validator_unit_active{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [1], type: lt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: Alerting
+        execErrState: Error
+        for: 3m
+        labels: {service: sn-validator, severity: page}
+        annotations:
+          summary: "sn-validator.service on snow has not been active and running for three minutes."
+        isPaused: false
+
+      # Counts automatic restarts only. A deploy resets the counter and is not a restart here.
+      - uid: sn-validator-restarted
+        title: SnValidatorRestarted
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 1800, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(delta(urnetwork_sn_validator_unit_restarts{env="main",host="snow",job="sn-validator"}[30m]))'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [0], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "systemd restarted the SN25 validator in the last 30 minutes; ten steering hard errors in a row end in a panic."
+        isPaused: false
+
+      # Absent while the validator's native or intent observation is not current; the progress rule covers that.
+      - uid: sn-validator-intent-late
+        title: SnValidatorIntentLate
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_intent_missing_blocks{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [100], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "The SN25 validator has not begun this native epoch's intent 100 blocks (20 minutes) in; it normally does by about 80."
+        isPaused: false
+
+      # The epoch is 361 blocks, so about 40 minutes remain to act.
+      - uid: sn-validator-intent-missing
+        title: SnValidatorIntentMissing
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_intent_missing_blocks{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [150], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels: {service: sn-validator, severity: page}
+        annotations:
+          summary: "The SN25 validator has not begun this native epoch's intent 150 blocks (30 minutes) in. A missed epoch strands it: restart it once now (SN-MAINNET-VALIDATOR.md)."
+        isPaused: false
+
+      # A lag of 1 is normal until the new epoch's intent begins; 2 or more is a missed epoch.
+      - uid: sn-validator-epoch-missed
+        title: SnValidatorEpochMissed
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_intent_epoch_lag{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [1], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels: {service: sn-validator, severity: page}
+        annotations:
+          summary: "The SN25 validator missed a native epoch. Its one-shot gap bridge is used, so it cannot resume on its own."
+        isPaused: false
+
+      # Each steering read replays the whole retained intent history, so passes slow as it grows.
+      - uid: sn-validator-steering-slow
+        title: SnValidatorSteeringSlow
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_steering_cycle_max_seconds{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [45], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "SN25 validator steering passes take over 45 seconds; each read attempt has 60."
+        isPaused: false
+
+      # Read waits retry; hard errors count toward the ten-in-a-row panic.
+      - uid: sn-validator-steering-failing
+        title: SnValidatorSteeringFailing
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_steering_hard_errors_recent{env="main",host="snow",job="sn-validator"} + urnetwork_sn_validator_steering_read_waits_recent{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [3], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "The SN25 validator logged more than three steering hard errors and read waits in 15 minutes."
+        isPaused: false
+
+      # The fallback submits at 400 blocks and checks every 10 minutes. Missing data means the fallback logged no check in 30 minutes.
+      - uid: sn-validator-weights-stale
+        title: SnValidatorWeightsStale
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_weights_age_blocks{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [500], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        labels: {service: sn-validator, severity: page}
+        annotations:
+          summary: "UID 1's SN25 weights are over 500 blocks old: neither the validator nor the weight fallback has committed."
+        isPaused: false
+
+      # The replay scratch grows tens of GB a day until the cleanup fix ships.
+      - uid: sn-validator-disk-low
+        title: SnValidatorDiskLow
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'min(urnetwork_sn_validator_state_filesystem_available_bytes{env="main",host="snow",job="sn-validator"} / urnetwork_sn_validator_state_filesystem_size_bytes{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [0.2], type: lt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "Snow's validator state filesystem has under 20% free."
+        isPaused: false
+
+      - uid: sn-validator-disk-critical
+        title: SnValidatorDiskCritical
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'min(urnetwork_sn_validator_state_filesystem_available_bytes{env="main",host="snow",job="sn-validator"} / urnetwork_sn_validator_state_filesystem_size_bytes{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [0.1], type: lt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels: {service: sn-validator, severity: page}
+        annotations:
+          summary: "Snow's validator state filesystem has under 10% free."
+        isPaused: false
+
+      # It grows about 80 KB per native epoch against a 64 MiB bound.
+      - uid: sn-validator-intents-file-large
+        title: SnValidatorIntentsFileLarge
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_intents_file_bytes{env="main",host="snow",job="sn-validator"} / urnetwork_sn_validator_intents_file_limit_bytes{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [0.5], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "The SN25 validator's retained intent file is past half its bound; it needs a history checkpoint."
+        isPaused: false
+
+      - uid: sn-validator-intents-file-critical
+        title: SnValidatorIntentsFileCritical
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_intents_file_bytes{env="main",host="snow",job="sn-validator"} / urnetwork_sn_validator_intents_file_limit_bytes{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [0.8], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels: {service: sn-validator, severity: page}
+        annotations:
+          summary: "The SN25 validator's retained intent file is past 80% of its bound."
+        isPaused: false
+
+      # Four hours spans more than three native epochs.
+      - uid: sn-validator-trails-not-completing
+        title: SnValidatorTrailsNotCompleting
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'max(urnetwork_sn_validator_trails_completed_recent{env="main",host="snow",job="sn-validator"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [1], type: lt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 4h
+        labels: {service: sn-validator, severity: warn}
+        annotations:
+          summary: "The SN25 validator has completed no trail for four hours; its measurements carry no provider evidence."
+        isPaused: false

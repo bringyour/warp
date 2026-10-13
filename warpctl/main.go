@@ -152,8 +152,8 @@ Options:
     --site_home=<site_home>        Site home. These are files that exist only on this host
     --message=<message>        Version stage message.
     --config_restart=<config_restart>  One of: yes, no. config-updater builds only. no writes config-updater.yml
-                               (restart: false) into the config version, so a block still on an older service
-                               version takes the config at its next deploy instead of restarting for it.
+                               (restart: false) into the config version, so a running block takes the config
+                               at its next deploy instead of restarting for it, whatever its service version.
     --percent=<percent>        Deploy to a percent of blocks, ordered lexicographically with beta first.
                                The block count is rounded up to the nearest int. 
     -b                         Include the build timestamp in the version. Use this for builds.
@@ -518,8 +518,9 @@ func build(opts docopt.Opts) {
 // buildConfigRestart reads --config_restart for `warpctl build`. It is the
 // config-updater's contract with the run worker: "no" has the Makefile write
 // config-updater.yml (restart: false) into the config version the image
-// carries, so a block still on an older service version takes the config at
-// its next deploy instead of restarting for it (holdConfigVersion in run.go).
+// carries, so a running block takes the config at its next deploy instead of
+// restarting for it, whatever its service version (holdConfigVersion in
+// run.go).
 // The default keeps what every config version has done: restart running
 // services.
 func buildConfigRestart(opts docopt.Opts, service string) (string, error) {
@@ -1711,6 +1712,11 @@ func logs(opts docopt.Opts) {
 	}
 }
 
+// The lego image certsIssue runs, pinned to an exact v4 release whose flags match
+// the arguments below. lego v5 rejects `--accept-tos`, so the unpinned image
+// failed every issuance once `latest` moved to v5 (2026-10-12).
+const legoImage = "goacme/lego:v4.35.2"
+
 func certsIssue(opts docopt.Opts) {
 	warpState := getWarpState()
 
@@ -1834,7 +1840,7 @@ func certsIssue(opts docopt.Opts) {
 			}
 			args = append(args, []string{
 				"-v", fmt.Sprintf("%s:/.lego:Z", legoHome),
-				"goacme/lego",
+				legoImage,
 				"--accept-tos",
 				"--key-type", "ec256",
 				"--dns", registrar,

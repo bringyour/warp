@@ -210,7 +210,7 @@ func runConfigPushPoll(t *testing.T, poll configPushPoll) configPushDecision {
 		}
 	}
 	t.Setenv("PATH", bin)
-	t.Setenv("WARP_HOME", home)
+	setTestWarpHome(t, home)
 
 	configHome := filepath.Join(home, "config")
 	for _, version := range []string{configPushOldConfig, configPushNewConfig} {

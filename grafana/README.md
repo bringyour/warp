@@ -48,6 +48,20 @@ services --push /metrics/job/...--> 127.0.0.1:<local_port> --> go front --> loca
   The containers are otherwise stateless and can be redeployed freely: loki
   and mimir flush to minio on stop, and the replication factor covers unclean
   stops.
+- **Metrics across redeploys**: a deploy replaces every Mimir ingester at
+  once, and each new one starts with an empty head. The TSDB directory stays
+  inside the container on purpose: warpctl starts the new container before it
+  drains the old one, and Mimir opens the TSDB without a lock file, so a
+  shared host path would put two ingesters on one WAL. The old ingesters flush
+  their heads to minio on stop. The queriers read every time range from the
+  store-gateways as well as from the ingesters (`query_store_after` and
+  `ignore_blocks_within` are 0). The flushed history is readable once the
+  compactor's next bucket-index update lists it (`cleanup_interval: 5m`),
+  within about 10 minutes of the deploy. With Mimir's defaults, the 12 hours
+  before each deploy stayed unreadable until they were 12 hours old. A head
+  that cannot reach minio when its container stops is lost: history is
+  missing for parts of 2026-10-11 and 2026-10-12, when edge-6's full minio
+  refused writes.
 - `warpctl service run` starts every container with the `local` docker log
   driver (rotated files on the host, `docker logs` works), and the bundled
   alloy ships the logs to loki. Grafana is the only log destination.

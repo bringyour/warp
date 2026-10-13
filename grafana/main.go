@@ -1192,6 +1192,23 @@ func mimirServerConfig(mimirHttpPort int, grpcListenPort int) map[string]any {
 	}
 }
 
+// mimirQuerierConfig sends every query to the store-gateways as well as to the
+// ingesters. Mimir's 12h query_store_after default assumes that an ingester
+// keeps its TSDB head across a restart: it reads the last 12 hours from the
+// ingesters alone and clamps every store-gateway request to now-12h. A grafana
+// deploy replaces every ingester within one polling window, and each new one
+// starts with an empty head in a fresh container. The head that the old
+// generation flushed to MinIO on shutdown (mimirTSDBConfig) then stayed
+// unreadable until it was 12 hours old. After the 2026-10-13 06:01Z deploy,
+// every host returned nothing between now-12h and the restart, although the
+// bucket held a block for every hour of that window. Zero queries the store for
+// every range.
+func mimirQuerierConfig() map[string]any {
+	return map[string]any{
+		"query_store_after": "0s",
+	}
+}
+
 func mimirBucketStoreConfig() map[string]any {
 	return map[string]any{
 		"sync_dir": "/var/lib/mimir/tsdb-sync",
@@ -1203,19 +1220,46 @@ func mimirBucketStoreConfig() map[string]any {
 		// There is one tenant and one small index, so refresh it every minute to
 		// bound convergence without hiding a warning that remains actionable.
 		"sync_interval": "1m",
+		// Load every block that a querier can ask for. Mimir's 10h default skips
+		// young, uncompacted blocks because its 12h query_store_after default
+		// never reads them. With the store queried for every range
+		// (mimirQuerierConfig), the default would skip the blocks that the
+		// replaced ingesters flushed. The querier's consistency check would then
+		// fail every query that touches one of those blocks.
+		"ignore_blocks_within": "0s",
 	}
 }
 
 func mimirTSDBConfig() map[string]any {
 	return map[string]any{
 		// The deploy deliberately leaves the Mimir data directory ephemeral so
-		// overlapping generations never write the same WAL/TSDB. Mimir's false
-		// default assumes that an incomplete head will be reused after restart;
-		// with an ephemeral directory that instead discards every sample not yet
-		// uploaded to object storage. Flush the partial head during the bounded
-		// clean shutdown before the old container is removed.
+		// overlapping generations never write the same WAL/TSDB: warpctl starts
+		// the new container before it drains the old one, and Mimir opens each
+		// tenant TSDB without a lock file. Mimir's false default assumes that an
+		// incomplete head will be reused after restart; with an ephemeral
+		// directory that instead discards every sample not yet uploaded to object
+		// storage. Flush the partial head during the bounded clean shutdown before
+		// the old container is removed. The queriers read those blocks through
+		// the store-gateways (mimirQuerierConfig).
 		"dir":                      "/var/lib/mimir/tsdb",
 		"flush_blocks_on_shutdown": true,
+	}
+}
+
+// mimirCompactorConfig also sets how often the compactor updates the bucket
+// index, which queriers and store-gateways use to discover blocks. In a deploy,
+// the new compactor's first update can run before the old ingesters finish
+// their shutdown flush. With Mimir's 15m default, the flushed blocks then
+// stayed unreadable for up to 16.5 minutes after the deploy (10% jitter). One
+// tenant with about 150 index entries keeps a 5-minute update cheap.
+func mimirCompactorConfig(lanIp string, grpcPort int) map[string]any {
+	return map[string]any{
+		"data_dir":         "/var/lib/mimir/compactor",
+		"cleanup_interval": "5m",
+		"sharding_ring": map[string]any{
+			"instance_addr": lanIp,
+			"instance_port": grpcPort,
+		},
 	}
 }
 
@@ -1271,17 +1315,16 @@ func mimirLimitsConfig(settings *MimirConfig) map[string]any {
 	return limits
 }
 
-func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSettings *HostSettings, ringHosts []string, grafanaConfig *GrafanaConfig) (string, ringProxyPorts) {
+// mimirConfig builds the Mimir child configuration document. The child listens
+// on the warp-allocated internal ring ports and advertises the fixed external
+// ports that the front proxies (see renderLokiConfig).
+func mimirConfig(host string, lanIp string, mimirHttpPort int, grpcListenPort int, gossipBindPort int, hostSettings *HostSettings, ringHosts []string, grafanaConfig *GrafanaConfig) map[string]any {
 	mimirSettings := grafanaConfig.Mimir
 	if mimirSettings == nil {
 		mimirSettings = &MimirConfig{}
 	}
-	// see renderLokiConfig: ring ports are the named constants, declared in
-	// services.yml, validated against WARP_PORTS (no silent default).
 	grpcPort := defaultMimirGrpcPort
 	gossipPort := defaultMimirGossipPort
-	grpcListenPort := requireServiceHostPort(grpcPort)
-	gossipBindPort := requireServiceHostPort(gossipPort)
 	replicationFactor := mimirSettings.ReplicationFactor
 	if replicationFactor == 0 {
 		replicationFactor = defaultReplicationFactor
@@ -1295,7 +1338,7 @@ func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSetting
 
 	joinMembers := ringJoinMembers(hostSettings, ringHosts, gossipPort)
 
-	mimirConfig := map[string]any{
+	return map[string]any{
 		"target":               "all",
 		"multitenancy_enabled": false,
 		"usage_stats": map[string]any{
@@ -1351,13 +1394,8 @@ func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSetting
 				"instance_port":      grpcPort,
 			},
 		},
-		"compactor": map[string]any{
-			"data_dir": "/var/lib/mimir/compactor",
-			"sharding_ring": map[string]any{
-				"instance_addr": lanIp,
-				"instance_port": grpcPort,
-			},
-		},
+		"compactor": mimirCompactorConfig(lanIp, grpcPort),
+		"querier":   mimirQuerierConfig(),
 		"blocks_storage": map[string]any{
 			"storage_prefix": "blocks",
 			"tsdb":           mimirTSDBConfig(),
@@ -1401,8 +1439,17 @@ func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSetting
 			},
 		},
 	}
+}
 
-	mimirConfigYaml, err := yaml.Marshal(mimirConfig)
+func renderMimirConfig(host string, lanIp string, mimirHttpPort int, hostSettings *HostSettings, ringHosts []string, grafanaConfig *GrafanaConfig) (string, ringProxyPorts) {
+	// see renderLokiConfig: ring ports are the named constants, declared in
+	// services.yml, validated against WARP_PORTS (no silent default).
+	grpcPort := defaultMimirGrpcPort
+	gossipPort := defaultMimirGossipPort
+	grpcListenPort := requireServiceHostPort(grpcPort)
+	gossipBindPort := requireServiceHostPort(gossipPort)
+
+	mimirConfigYaml, err := yaml.Marshal(mimirConfig(host, lanIp, mimirHttpPort, grpcListenPort, gossipBindPort, hostSettings, ringHosts, grafanaConfig))
 	if err != nil {
 		panic(err)
 	}

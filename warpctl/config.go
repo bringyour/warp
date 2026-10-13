@@ -1899,7 +1899,9 @@ func (self *NginxConfig) addServiceBlocks() {
 		if err != nil {
 			panic(err)
 		}
-		corsAllowsCredentials := !slices.Contains(corsOrigins, "*")
+		// an allowlist echoes the request's own origin, so a cache must key
+		// the response by it; the wildcard is one answer for every origin
+		corsEchoesOrigin := !slices.Contains(corsOrigins, "*")
 		if !serviceConfig.IsExposed() {
 			continue
 		}
@@ -2069,9 +2071,14 @@ func (self *NginxConfig) addServiceBlocks() {
 	                                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,X-UR-ClientInfo,Authorization,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
 	                                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
 	                                    `)
-										if corsAllowsCredentials {
+										// No service is sent credentialed cross-origin requests:
+										// the browser clients send their jwt in Authorization and
+										// the server drops cookies (server/session/cookies.go). So
+										// the lb never sends Access-Control-Allow-Credentials, and
+										// a page on an allowed origin cannot make a browser attach
+										// a cookie or client certificate (lag.dev/PLAN.md W2).
+										if corsEchoesOrigin {
 											self.raw(`
-	                                        add_header 'Access-Control-Allow-Credentials' 'true' always;
 	                                        add_header 'Vary' 'Origin' always;
 	                                        `)
 										}

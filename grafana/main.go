@@ -1680,55 +1680,7 @@ func renderGrafanaConfig(env string, domain string, grafanaHttpPort int, localPo
 
 	grafanaHostname := fmt.Sprintf("%s-grafana.%s", env, domain)
 
-	grafanaIni := fmt.Sprintf(`
-[server]
-protocol = http
-; the authenticated go front is the only intended caller
-http_addr = 127.0.0.1
-http_port = %d
-domain = %s
-root_url = https://%s/
-
-%s
-
-%s
-
-[security]
-admin_user = admin
-admin_password = """%s"""
-cookie_secure = true
-
-[users]
-allow_sign_up = false
-
-[analytics]
-reporting_enabled = false
-check_for_updates = false
-check_for_plugin_updates = false
-
-%s
-
-[plugins]
-; Logs Drilldown and the Grafana-13 standalone Prometheus and Loki datasources
-; are checksum-pinned and baked into the image. Do not make container readiness
-; depend on Grafana's asynchronous internet downloader.
-preinstall_disabled = true
-
-[paths]
-data = /var/lib/grafana
-logs = /var/lib/grafana/logs
-plugins = /var/lib/grafana/plugins
-provisioning = %s/provisioning
-`,
-		grafanaHttpPort,
-		grafanaHostname,
-		grafanaHostname,
-		databaseSection,
-		remoteCacheSection,
-		grafanaConfig.Grafana.AdminPassword,
-		geomapSection,
-		runDir,
-	)
+	grafanaIni := renderGrafanaIni(grafanaHttpPort, grafanaHostname, databaseSection, remoteCacheSection, grafanaConfig.Grafana.AdminPassword, geomapSection)
 	grafanaIniPath := filepath.Join(runDir, "grafana.ini")
 	writeFile(grafanaIniPath, grafanaIni, 0640)
 
@@ -1768,6 +1720,78 @@ provisioning = %s/provisioning
 	}
 
 	return grafanaIniPath
+}
+
+// renderGrafanaIni is grafana.ini, with the sections renderGrafanaConfig
+// derives.
+//
+// The login session cookie is hardened as Grafana's security hardening guide
+// documents. Extender hosts are getting names under bringyour.com
+// (<id>.extender.bringyour.com, mmm lag.dev/PLAN.md N1, C3), and each runs
+// software its volunteer controls. Until that zone is on the Public Suffix
+// List, a page on such a host is same-site with grafana.bringyour.com and can
+// set a cookie for all of bringyour.com. The __Host- prefix makes browsers
+// accept the session cookie only from this host, Secure, with Path=/ and no
+// Domain, so no sibling host can set, overwrite or receive it; it relies on
+// root_url having no subpath. SameSite=Strict keeps the cookie off every
+// request another site starts, including a same-site sibling's. That means a
+// link into Grafana from another site, such as an alert notification, first
+// lands on the login page. Grafana's login is its own form (no OAuth or SAML,
+// which would need lax).
+func renderGrafanaIni(grafanaHttpPort int, grafanaHostname string, databaseSection string, remoteCacheSection string, adminPassword string, geomapSection string) string {
+	return fmt.Sprintf(`
+[server]
+protocol = http
+; the authenticated go front is the only intended caller
+http_addr = 127.0.0.1
+http_port = %d
+domain = %s
+root_url = https://%s/
+
+%s
+
+%s
+
+[auth]
+login_cookie_name = __Host-grafana_session
+
+[security]
+admin_user = admin
+admin_password = """%s"""
+cookie_secure = true
+cookie_samesite = strict
+
+[users]
+allow_sign_up = false
+
+[analytics]
+reporting_enabled = false
+check_for_updates = false
+check_for_plugin_updates = false
+
+%s
+
+[plugins]
+; Logs Drilldown and the Grafana-13 standalone Prometheus and Loki datasources
+; are checksum-pinned and baked into the image. Do not make container readiness
+; depend on Grafana's asynchronous internet downloader.
+preinstall_disabled = true
+
+[paths]
+data = /var/lib/grafana
+logs = /var/lib/grafana/logs
+plugins = /var/lib/grafana/plugins
+provisioning = %s/provisioning
+`,
+		grafanaHttpPort,
+		grafanaHostname,
+		grafanaHostname,
+		databaseSection,
+		remoteCacheSection,
+		adminPassword,
+		geomapSection,
+		runDir,
+	)
 }
 
 // the go http front

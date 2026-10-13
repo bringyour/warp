@@ -42,7 +42,7 @@ const (
 // these; any other caller-chosen label is logged as "other".
 var statsPushJobClasses = map[string]struct{}{
 	"alt": {}, "api": {}, "app": {}, "config-updater": {}, "connect": {},
-	"gossip": {}, "grafana": {}, "lb": {}, "mcp": {}, "proxy": {},
+	"gossip": {}, "grafana": {}, "lb": {}, "mcp": {}, "mmm": {}, "proxy": {},
 	"taskworker": {}, "web": {},
 }
 

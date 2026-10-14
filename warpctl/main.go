@@ -187,7 +187,8 @@ Options:
     --only-older               Only update blocks with entirely older versions.
     --repo                     List versions from the docker repo.
     --sample                   List versions from sampling deployed status (the method used by deploy).
-    --timeout=<timeout>        Timeout in seconds.
+    --timeout=<timeout>        Convergence timeout as a duration (default 120s).
+                               0 promotes the version without polling; negative waits indefinitely.
     --query=<query>            Log query.
    	--since=<since>            Lookback duration (5m, 2h30m) or start timestamp. A timestamp carrying an offset or Z is read at that offset; one without is read in local time, or utc with --utc. A time with no date is today. Accepted: 2006-01-02T15:04:05.999-07:00, 2006-01-02T15:04:05.999, 2006-01-02 15:04, 2006-01-02, 15:04:05, 15:04
    	--limit=<n>                Lookback record count.
@@ -572,6 +573,9 @@ func importImage(opts docopt.Opts) {
 	}
 }
 
+var deployPollBlockStatusUntil = pollLbBlockStatusUntil
+var deployPollServiceStatusUntil = pollLbServiceStatusUntil
+
 func deploy(opts docopt.Opts) {
 	env, _ := opts.String("<env>")
 	service, _ := opts.String("<service>")
@@ -767,15 +771,17 @@ func deploy(opts docopt.Opts) {
 	// it's not possible to reach the status routes via the external hostname
 	// the /status routes will not have consistent ports for transparent lbs
 
-	if !transparent {
+	if timeout == 0 {
+		Out.Printf("Version promoted; skipping convergence polling because --timeout is 0.")
+	} else if !transparent {
 		// poll the load balancer for the specific blocks until the versions stabilize
 		Out.Printf("Block status:")
-		pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion, timeout)
+		deployPollBlockStatusUntil(env, service, deployBlocks, deployVersion, timeout)
 
 		if reflect.DeepEqual(orderedBlocks, deployBlocks) {
 			// poll the load balancer for all blocks until the version stabilizes
 			Out.Printf("Service status:")
-			pollLbServiceStatusUntil(env, service, deployVersion, timeout)
+			deployPollServiceStatusUntil(env, service, deployVersion, timeout)
 		}
 	} else {
 		Out.Printf("Will not poll status because service is transparent.")

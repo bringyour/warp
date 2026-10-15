@@ -46,6 +46,39 @@ type ServicesConfig struct {
 	// What `warpctl dns` publishes for the domains, beyond what the latest
 	// version derives on its own.
 	Dns *DnsConfig `yaml:"dns,omitempty"`
+	// Hosts whose requests the lb writes no access log line for, so their
+	// paths and queries, user agents and times are not kept. Each is an exact
+	// host the lb serves. An error nginx reports for such a request still
+	// reaches the error log, with the client address scrubbed
+	// (warp.ClientAddrScrubber). lag.dev keeps no request logs
+	// (mmm/lag.dev/PLAN.md W1).
+	NoAccessLog []string `yaml:"no_access_log,omitempty"`
+}
+
+// NoAccessLogHosts returns the no_access_log hosts the way nginx spells a
+// request's $host (lowercase, with no port or trailing dot), sorted and
+// without repeats.
+func (self *ServicesConfig) NoAccessLogHosts() []string {
+	hosts := []string{}
+	for _, host := range self.NoAccessLog {
+		hosts = append(hosts, strings.TrimSuffix(strings.ToLower(host), "."))
+	}
+	sort.Strings(hosts)
+	return slices.Compact(hosts)
+}
+
+// an exact host: no wildcard, scheme, port or path
+var noAccessLogHostRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+
+// A wildcard, url or host:port in no_access_log never equals a request's
+// $host, so the host it was meant to cover would be logged after all.
+func validateNoAccessLog(servicesConfig *ServicesConfig) error {
+	for _, host := range servicesConfig.NoAccessLogHosts() {
+		if !noAccessLogHostRegex.MatchString(host) {
+			return fmt.Errorf("no_access_log entry %q is not an exact hostname", host)
+		}
+	}
+	return nil
 }
 
 // DnsConfig tunes `warpctl dns plan|sync`, which derives the public records

@@ -1247,3 +1247,42 @@ versions:
 		}
 	}
 }
+
+// The lb compares no_access_log with nginx's $host, which is lowercase with no
+// trailing dot, so an entry is spelled the same way before the comparison.
+func TestNoAccessLogHostsSpellHostsAsNginxHost(t *testing.T) {
+	servicesConfig, err := loadInlineServicesConfig(t, `
+no_access_log:
+  - www.lag.dev
+  - LAG.dev.
+  - lag.dev
+versions:
+  - services:
+      mmm:
+        expose_aliases: [lag.dev, www.lag.dev]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := servicesConfig.NoAccessLogHosts(); !slices.Equal(got, []string{"lag.dev", "www.lag.dev"}) {
+		t.Fatalf("no_access_log hosts = %v", got)
+	}
+}
+
+// An entry that can never equal a request's $host would leave the host it was
+// meant for logged, so the config does not load.
+func TestLoadServicesConfigRejectsInexactNoAccessLogHost(t *testing.T) {
+	for _, host := range []string{"*.lag.dev", ".lag.dev", "https://lag.dev", "lag.dev:443", "lag.dev/r/", "lag", ""} {
+		err := loadInlineServices(t, fmt.Sprintf(`
+no_access_log:
+  - %q
+versions:
+  - services:
+      mmm:
+        expose_aliases: [lag.dev]
+`, host))
+		if err == nil || !strings.Contains(err.Error(), "no_access_log") {
+			t.Fatalf("no_access_log entry %q: err = %v, want it rejected", host, err)
+		}
+	}
+}

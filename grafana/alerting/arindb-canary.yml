@@ -14,12 +14,13 @@
 # its pair of databases until comparisons pass with a margin; risk always
 # follows the latest database, so a speed or online loss, which only risk can
 # cause, pages without an automatic repair. the breaker trips only on a net
-# quality loss, so gains, gross churn, a cohort that shrinks before the canary
-# can compare it, a tripped warming comparison, a lost protection and a serving
-# epoch switching back and forth page separately. loss, gain and churn page
-# only with at least 20 paired providers of old supply in the bucket. a missing
-# series is OK here: a build without the canary exports none, and a stalled
-# indexer keeps its last decision time, which the stale rules catch.
+# quality loss, so a cohort that shrinks before the canary can compare it, a
+# tripped warming comparison, a lost protection and a serving epoch switching
+# back and forth page separately, and gains, gross churn and an unverified
+# latest served while warming warn. loss, gain and churn alert only with at
+# least 20 paired providers of old supply in the bucket. a missing series is
+# OK here: a build without the canary exports none, and a stalled indexer keeps
+# its last decision time, which the stale rules catch.
 #
 # only rules are provisioned here: contact points and notification policies
 # are managed in the grafana ui. rules fire with a severity label (page | warn)
@@ -356,7 +357,8 @@ groups:
           summary: The last {{ $labels.env }} ARIN canary decision is {{ $values.A }}s old, past 90 minutes; the score export is stalled. Investigate update_client_scores at once.
         isPaused: false
       # the breaker trips only on losses: a large net gain is a flood, such as
-      # hosting or vpn ranges a source stopped supplying
+      # hosting or vpn ranges a source stopped supplying, or a deliberate catalog
+      # expansion, so it warns
       - uid: arindb-supply-gain
         title: ArinDbSupplyGain
         condition: B
@@ -403,14 +405,14 @@ groups:
                   type: query
         noDataState: OK
         execErrState: Error
-        for: 10m
+        for: 30m
         labels:
-          severity: page
+          severity: warn
         annotations:
           summary: The latest ARIN database adds {{ $values.A }} of {{ $labels.env }} {{ $labels.bucket }} supply against the old one. Compare the release's catalog audit and source counts with the previous release's.
         isPaused: false
       # the net loss hides a release that moves as many providers out of a
-      # bucket as into it
+      # bucket as into it; deliberate or not, so it warns
       - uid: arindb-supply-churn
         title: ArinDbSupplyChurn
         condition: B
@@ -457,14 +459,16 @@ groups:
                   type: query
         noDataState: OK
         execErrState: Error
-        for: 10m
+        for: 30m
         labels:
-          severity: page
+          severity: warn
         annotations:
           summary: The latest ARIN database moves {{ $values.A }} of {{ $labels.env }} {{ $labels.bucket }} supply in or out against the old one. Review the release's rule and source changes.
         isPaused: false
       # warming with a paired sample large enough to judge that trips: the
-      # latest is held out before the cohort is covered
+      # latest is held out before the cohort is covered. below the old database's
+      # warming floor each row's latest slot applies the blocked latest to the
+      # rows a restarted process wrote, so this page is the protection then
       - uid: arindb-warming-tripped
         title: ArinDbWarmingTripped
         condition: B
@@ -517,8 +521,10 @@ groups:
         annotations:
           summary: The {{ $labels.env }} ARIN canary is warming and its paired sample trips the breaker, so the latest is held out. Judge the release from the losses on the providers dashboard and pin the last good arin.mmdb with ARIN_PREVIOUS_DATABASE_FILE if it is bad.
         isPaused: false
-      # the publishing taskworker cannot open its latest database, or the
-      # canary went single right after a fallback
+      # the publishing taskworker cannot open its latest database, or a latched
+      # fallback's old database is not served: warming serves each row's latest
+      # slot while the latch is held, the canary went single after it, or a
+      # release compares against the latest it held out
       - uid: arindb-protection-lost
         title: ArinDbProtectionLost
         condition: B
@@ -572,7 +578,9 @@ groups:
           summary: The {{ $labels.env }} ARIN canary lost its protection ({{ $labels.flag }}). Monitor signal §2.9d names the next step.
         isPaused: false
       # a provider whose latest lookup fails never reaches the cohort, so the
-      # comparison cannot see it
+      # comparison cannot see it; the page needs a pair compared for under two
+      # hours or failing latest lookups, so a connect outage or a restart is not
+      # blamed on a release
       - uid: arindb-cohort-shrink
         title: ArinDbCohortShrink
         condition: B
@@ -584,7 +592,7 @@ groups:
             datasourceUid: warp-mimir
             model:
               editorMode: code
-              expr: max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100)
+              expr: max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100) and on (env) ((time() - max by (env) (urnetwork_stats_arindb_pair_since_seconds) < 7200) or on (env) (sum by (env) (rate(urnetwork_arin_lookup_errors_total{slot="latest"}[30m])) > 0))
               instant: true
               range: false
               intervalMs: 1000
@@ -732,4 +740,58 @@ groups:
           severity: warn
         annotations:
           summary: A share of {{ $values.A }} of {{ $labels.env }} ARIN canary decision reads were not ok over ten minutes. Split urnetwork_arindb_decision_reads_total by outcome on the services overview.
+        isPaused: false
+      # warming serves the latest unverified: its paired sample is below
+      # min_paired_sample or passes, and no covered comparison has checked it
+      - uid: arindb-warming-serves-latest
+        title: ArinDbWarmingServesLatest
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env) (urnetwork_stats_arindb_decision_flags{flag="warming_serves_latest"})
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 30m
+        labels:
+          severity: warn
+        annotations:
+          summary: The {{ $labels.env }} ARIN canary has served an unverified latest database while warming for 30 minutes. Find why the old database is not carried, such as a stuck connect host or a rollup that has not refreshed.
         isPaused: false

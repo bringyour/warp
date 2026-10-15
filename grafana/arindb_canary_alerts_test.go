@@ -255,16 +255,14 @@ func arindbCanaryOldSupply(env string, old float64) []arindbCanarySample {
 	return samples
 }
 
-// The breaker sees only net losses of a covered comparison. A gain or gross
-// churn with a sample, a tripped warming comparison, a lost protection, a
-// cohort shrinking before the canary can compare it, a serving epoch switching
-// back and forth and a decision stalled for 90 minutes page on their own.
+// The breaker sees only net losses of a covered comparison. A tripped warming
+// comparison, a lost protection, a cohort shrinking before the canary can
+// compare it, a serving epoch switching back and forth and a decision stalled
+// for 90 minutes page on their own.
 func TestArindbCanaryAlertsPageOnWhatTheBreakerCannotSee(t *testing.T) {
 	rules := arindbCanaryAlertRules(t)
 	for uid, want := range map[string]struct{ title, holdFor string }{
 		"arindb-decision-stalled": {title: "ArinDbDecisionStalled", holdFor: "1m"},
-		"arindb-supply-gain":      {title: "ArinDbSupplyGain", holdFor: "10m"},
-		"arindb-supply-churn":     {title: "ArinDbSupplyChurn", holdFor: "10m"},
 		"arindb-warming-tripped":  {title: "ArinDbWarmingTripped", holdFor: "10m"},
 		"arindb-protection-lost":  {title: "ArinDbProtectionLost", holdFor: "10m"},
 		"arindb-cohort-shrink":    {title: "ArinDbCohortShrink", holdFor: "10m"},
@@ -283,14 +281,6 @@ func TestArindbCanaryAlertsPageOnWhatTheBreakerCannotSee(t *testing.T) {
 		samples []arindbCanarySample
 		firing  []string
 	}{
-		{uid: "arindb-supply-gain", firing: []string{"env=main,bucket=quality"}, samples: append(arindbCanaryOldSupply("main", 20),
-			arindbCanarySample{name: "urnetwork_stats_arindb_gain_ratio", labels: map[string]string{"env": "main", "bucket": "quality"}, value: 0.11},
-			arindbCanarySample{name: "urnetwork_stats_arindb_gain_ratio", labels: map[string]string{"env": "main", "bucket": "speed"}, value: 0.10})},
-		{uid: "arindb-supply-gain", samples: append(arindbCanaryOldSupply("main", 19),
-			arindbCanarySample{name: "urnetwork_stats_arindb_gain_ratio", labels: map[string]string{"env": "main", "bucket": "quality"}, value: 0.5})},
-		{uid: "arindb-supply-churn", firing: []string{"env=main,bucket=online"}, samples: append(arindbCanaryOldSupply("main", 100),
-			arindbCanarySample{name: "urnetwork_stats_arindb_churn_ratio", labels: map[string]string{"env": "main", "bucket": "online"}, value: 0.21},
-			arindbCanarySample{name: "urnetwork_stats_arindb_churn_ratio", labels: map[string]string{"env": "main", "bucket": "quality"}, value: 0.20})},
 		{uid: "arindb-warming-tripped", firing: []string{"env=main"}, samples: []arindbCanarySample{
 			{name: "urnetwork_stats_arindb_decision_flags", labels: map[string]string{"env": "main", "flag": "warming_tripped"}, value: 1},
 			{name: "urnetwork_stats_arindb_decision_flags", labels: map[string]string{"env": "beta", "flag": "warming_serves_latest"}, value: 1}}},
@@ -298,11 +288,6 @@ func TestArindbCanaryAlertsPageOnWhatTheBreakerCannotSee(t *testing.T) {
 			{name: "urnetwork_stats_arindb_decision_flags", labels: map[string]string{"env": "main", "flag": "latest_unavailable"}, value: 1},
 			{name: "urnetwork_stats_arindb_decision_flags", labels: map[string]string{"env": "main", "flag": "fallback_dropped"}, value: 1},
 			{name: "urnetwork_stats_arindb_decision_flags", labels: map[string]string{"env": "main", "flag": "pair_carried"}, value: 1}}},
-		{uid: "arindb-cohort-shrink", firing: []string{"env=main"}, samples: []arindbCanarySample{
-			{name: "urnetwork_stats_arindb_cohort_loss_ratio", labels: map[string]string{"env": "main"}, value: 0.12},
-			{name: "urnetwork_stats_arindb_cohort_providers", labels: map[string]string{"env": "main", "reference": "reference"}, value: 100},
-			{name: "urnetwork_stats_arindb_cohort_loss_ratio", labels: map[string]string{"env": "beta"}, value: 0.5},
-			{name: "urnetwork_stats_arindb_cohort_providers", labels: map[string]string{"env": "beta", "reference": "reference"}, value: 99}}},
 		{uid: "arindb-serving-flapping", firing: []string{"env=main"}, samples: []arindbCanarySample{
 			{name: "urnetwork_stats_arindb_serving_changes", labels: map[string]string{"env": "main"}, value: 5},
 			{name: "urnetwork_stats_arindb_serving_changes", labels: map[string]string{"env": "beta"}, value: 4}}},
@@ -314,6 +299,65 @@ func TestArindbCanaryAlertsPageOnWhatTheBreakerCannotSee(t *testing.T) {
 		if !slices.Equal(firing, c.firing) {
 			t.Errorf("%s fires for %v, want %v", c.uid, firing, c.firing)
 		}
+	}
+}
+
+// A gain or gross churn with a sample, and an unverified latest served while
+// warming, warn after 30 minutes: a deliberate catalog expansion gains and
+// churns too, and warming ends on its own once coverage returns.
+func TestArindbCanaryAlertsWarnOnGainChurnAndAnUnverifiedLatest(t *testing.T) {
+	rules := arindbCanaryAlertRules(t)
+	for uid, title := range map[string]string{
+		"arindb-supply-gain":           "ArinDbSupplyGain",
+		"arindb-supply-churn":          "ArinDbSupplyChurn",
+		"arindb-warming-serves-latest": "ArinDbWarmingServesLatest",
+	} {
+		rule, ok := rules[uid]
+		if !ok {
+			t.Fatalf("missing %s", uid)
+		}
+		if rule.Title != title || rule.Labels["severity"] != "warn" || rule.For != "30m" || rule.Data[0].DatasourceUID != "warp-mimir" {
+			t.Errorf("%s: title=%s severity=%s for=%s", uid, rule.Title, rule.Labels["severity"], rule.For)
+		}
+	}
+	for _, c := range []struct {
+		uid     string
+		samples []arindbCanarySample
+		firing  []string
+	}{
+		{uid: "arindb-supply-gain", firing: []string{"env=main,bucket=quality"}, samples: append(arindbCanaryOldSupply("main", 20),
+			arindbCanarySample{name: "urnetwork_stats_arindb_gain_ratio", labels: map[string]string{"env": "main", "bucket": "quality"}, value: 0.11},
+			arindbCanarySample{name: "urnetwork_stats_arindb_gain_ratio", labels: map[string]string{"env": "main", "bucket": "speed"}, value: 0.10})},
+		{uid: "arindb-supply-gain", samples: append(arindbCanaryOldSupply("main", 19),
+			arindbCanarySample{name: "urnetwork_stats_arindb_gain_ratio", labels: map[string]string{"env": "main", "bucket": "quality"}, value: 0.5})},
+		{uid: "arindb-supply-churn", firing: []string{"env=main,bucket=online"}, samples: append(arindbCanaryOldSupply("main", 100),
+			arindbCanarySample{name: "urnetwork_stats_arindb_churn_ratio", labels: map[string]string{"env": "main", "bucket": "online"}, value: 0.21},
+			arindbCanarySample{name: "urnetwork_stats_arindb_churn_ratio", labels: map[string]string{"env": "main", "bucket": "quality"}, value: 0.20})},
+		{uid: "arindb-warming-serves-latest", firing: []string{"env=main"}, samples: []arindbCanarySample{
+			{name: "urnetwork_stats_arindb_decision_flags", labels: map[string]string{"env": "main", "flag": "warming_serves_latest"}, value: 1},
+			{name: "urnetwork_stats_arindb_decision_flags", labels: map[string]string{"env": "beta", "flag": "warming_tripped"}, value: 1}}},
+	} {
+		firing := firingArindbCanaryGroups(t, rules[c.uid], c.samples, 1_800_000_000)
+		if !slices.Equal(firing, c.firing) {
+			t.Errorf("%s fires for %v, want %v", c.uid, firing, c.firing)
+		}
+	}
+}
+
+// A shrinking cohort pages only where a release can explain it: a pair
+// compared for under two hours, or latest lookups failing, as each process
+// counts them. A Connect outage or a restart shrinks the cohort too.
+func TestArindbCanaryAlertsGateTheCohortPageOnARelease(t *testing.T) {
+	rule, ok := arindbCanaryAlertRules(t)["arindb-cohort-shrink"]
+	if !ok {
+		t.Fatal("missing arindb-cohort-shrink")
+	}
+	want := `max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100) and on (env) ((time() - max by (env) (urnetwork_stats_arindb_pair_since_seconds) < 7200) or on (env) (sum by (env) (rate(urnetwork_arin_lookup_errors_total{slot="latest"}[30m])) > 0))`
+	if rule.Data[0].Model.Expr != want {
+		t.Fatalf("cohort rule expression %s, want %s", rule.Data[0].Model.Expr, want)
+	}
+	if evaluator := rule.Data[1].Model.Conditions[0].Evaluator; evaluator.Type != "gt" || len(evaluator.Params) != 1 || evaluator.Params[0] != 0.1 {
+		t.Fatalf("cohort rule threshold %s %v", evaluator.Type, evaluator.Params)
 	}
 }
 
@@ -388,8 +432,8 @@ func TestArindbCanaryAlertsWarnOnUnavailableWarmingAndStale(t *testing.T) {
 // keeps its last decision time for the stale rule.
 func TestArindbCanaryAlertsAreActionableAndQuietWithoutTheCanary(t *testing.T) {
 	rules := arindbCanaryAlertRules(t)
-	if len(rules) != 13 {
-		t.Fatalf("%d canary rules, want 13", len(rules))
+	if len(rules) != 14 {
+		t.Fatalf("%d canary rules, want 14", len(rules))
 	}
 	for uid, rule := range rules {
 		if rule.NoDataState != "OK" {

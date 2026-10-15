@@ -579,8 +579,9 @@ groups:
         isPaused: false
       # a provider whose latest lookup fails never reaches the cohort, so the
       # comparison cannot see it; the page needs a pair compared for under two
-      # hours or failing latest lookups, so a connect outage or a restart is not
-      # blamed on a release
+      # hours or more than 1% of latest lookups failing, so a connect outage, a
+      # restart or a background of failures such as geolite2 misses on
+      # classifier-v0 records is not blamed on a release
       - uid: arindb-cohort-shrink
         title: ArinDbCohortShrink
         condition: B
@@ -592,7 +593,7 @@ groups:
             datasourceUid: warp-mimir
             model:
               editorMode: code
-              expr: max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100) and on (env) ((time() - max by (env) (urnetwork_stats_arindb_pair_since_seconds) < 7200) or on (env) (sum by (env) (rate(urnetwork_arin_lookup_errors_total{slot="latest"}[30m])) > 0))
+              expr: max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100) and on (env) ((time() - max by (env) (urnetwork_stats_arindb_pair_since_seconds) < 7200) or on (env) (sum by (env) (rate(urnetwork_arin_lookup_errors_total{slot="latest"}[30m])) / sum by (env) (rate(urnetwork_arin_lookups_total{slot="latest"}[30m])) > 0.01))
               instant: true
               range: false
               intervalMs: 1000

@@ -345,14 +345,15 @@ func TestArindbCanaryAlertsWarnOnGainChurnAndAnUnverifiedLatest(t *testing.T) {
 }
 
 // A shrinking cohort pages only where a release can explain it: a pair
-// compared for under two hours, or latest lookups failing, as each process
-// counts them. A Connect outage or a restart shrinks the cohort too.
+// compared for under two hours, or more than 1% of latest lookups failing, as
+// the processes count them. A Connect outage, a restart or a background of
+// failed lookups shrinks or accompanies the cohort too.
 func TestArindbCanaryAlertsGateTheCohortPageOnARelease(t *testing.T) {
 	rule, ok := arindbCanaryAlertRules(t)["arindb-cohort-shrink"]
 	if !ok {
 		t.Fatal("missing arindb-cohort-shrink")
 	}
-	want := `max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100) and on (env) ((time() - max by (env) (urnetwork_stats_arindb_pair_since_seconds) < 7200) or on (env) (sum by (env) (rate(urnetwork_arin_lookup_errors_total{slot="latest"}[30m])) > 0))`
+	want := `max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100) and on (env) ((time() - max by (env) (urnetwork_stats_arindb_pair_since_seconds) < 7200) or on (env) (sum by (env) (rate(urnetwork_arin_lookup_errors_total{slot="latest"}[30m])) / sum by (env) (rate(urnetwork_arin_lookups_total{slot="latest"}[30m])) > 0.01))`
 	if rule.Data[0].Model.Expr != want {
 		t.Fatalf("cohort rule expression %s, want %s", rule.Data[0].Model.Expr, want)
 	}

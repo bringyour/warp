@@ -768,7 +768,10 @@ func nginxServicesWithLongStatusMapKey(t testing.TB, baseYaml []byte) []byte {
 	return []byte(servicesYaml)
 }
 
-func TestNginxConfigValidation(t *testing.T) {
+// Returns an installed nginx that can run the generated production config, or
+// skips the test when there is none.
+func nginxConfigValidationBinary(t *testing.T) string {
+	t.Helper()
 	nginxBinary := ""
 	if configuredBinary := os.Getenv("NGINX_UDP_PROXY_V2_BINARY"); configuredBinary != "" {
 		resolvedBinary, err := exec.LookPath(configuredBinary)
@@ -803,6 +806,60 @@ func TestNginxConfigValidation(t *testing.T) {
 	if nginxBinary == "" {
 		t.Skip("NGINX not found; install a production-capable build or set NGINX_UDP_PROXY_V2_BINARY")
 	}
+	return nginxBinary
+}
+
+// Rewrites a generated lb config to load outside the lb image: certificates
+// from the test vault, local mime types and upstreams, and none of what needs
+// root, the image's files or the network.
+func localNginxConfig(config string, vaultDir string) string {
+	config = strings.ReplaceAll(config, "/srv/warp/vault/", vaultDir+"/")
+
+	config = strings.ReplaceAll(config, "user www-data;", "")
+	config = strings.ReplaceAll(config, "pid /run/nginx.pid;", "")
+	config = strings.ReplaceAll(config, "include /etc/nginx/modules-enabled/*.conf;", "")
+	config = strings.ReplaceAll(config, "use epoll;", "")
+
+	mimeTypesLocations := []string{
+		"/opt/homebrew/etc/nginx/mime.types",
+		"/usr/local/etc/nginx/mime.types",
+		"/etc/nginx/mime.types",
+	}
+	localMimeTypes := ""
+	for _, p := range mimeTypesLocations {
+		if _, err := os.Stat(p); err == nil {
+			localMimeTypes = p
+			break
+		}
+	}
+	if localMimeTypes != "" {
+		config = strings.ReplaceAll(config, "include /etc/nginx/mime.types;", "include "+localMimeTypes+";")
+	} else {
+		config = strings.ReplaceAll(config, "include /etc/nginx/mime.types;", "")
+	}
+
+	config = strings.ReplaceAll(config, "server testservices:", "server 127.0.0.1:")
+
+	lines := strings.Split(config, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ssl_dhparam") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "resolver ") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "ssl_stapling") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return strings.Join(filtered, "\n")
+}
+
+func TestNginxConfigValidation(t *testing.T) {
+	nginxBinary := nginxConfigValidationBinary(t)
 
 	baseYaml, err := testServicesFS.ReadFile("testdata/services.yml")
 	assert.Equal(t, err, nil)
@@ -817,49 +874,7 @@ func TestNginxConfigValidation(t *testing.T) {
 	assert.NotEqual(t, len(blockConfigs), 0)
 
 	for block, config := range blockConfigs {
-		config = strings.ReplaceAll(config, "/srv/warp/vault/", vaultDir+"/")
-
-		config = strings.ReplaceAll(config, "user www-data;", "")
-		config = strings.ReplaceAll(config, "pid /run/nginx.pid;", "")
-		config = strings.ReplaceAll(config, "include /etc/nginx/modules-enabled/*.conf;", "")
-		config = strings.ReplaceAll(config, "use epoll;", "")
-
-		mimeTypesLocations := []string{
-			"/opt/homebrew/etc/nginx/mime.types",
-			"/usr/local/etc/nginx/mime.types",
-			"/etc/nginx/mime.types",
-		}
-		localMimeTypes := ""
-		for _, p := range mimeTypesLocations {
-			if _, err := os.Stat(p); err == nil {
-				localMimeTypes = p
-				break
-			}
-		}
-		if localMimeTypes != "" {
-			config = strings.ReplaceAll(config, "include /etc/nginx/mime.types;", "include "+localMimeTypes+";")
-		} else {
-			config = strings.ReplaceAll(config, "include /etc/nginx/mime.types;", "")
-		}
-
-		config = strings.ReplaceAll(config, "server testservices:", "server 127.0.0.1:")
-
-		lines := strings.Split(config, "\n")
-		filtered := make([]string, 0, len(lines))
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "ssl_dhparam") {
-				continue
-			}
-			if strings.HasPrefix(trimmed, "resolver ") {
-				continue
-			}
-			if strings.HasPrefix(trimmed, "ssl_stapling") {
-				continue
-			}
-			filtered = append(filtered, line)
-		}
-		config = strings.Join(filtered, "\n")
+		config = localNginxConfig(config, vaultDir)
 
 		tmpDir := t.TempDir()
 		confPath := filepath.Join(tmpDir, "nginx.conf")

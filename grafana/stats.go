@@ -3,11 +3,17 @@ package main
 // the flat public stats feed, merged into /stats.json (see main.go).
 // the feed implements the network operator stats contract consumed by
 // ur.xyz (react/src/lib/network.js) and the current-inventory counters on
-// ur.io: block accumulators plus cumulative totals, derived from mimir with
-// instant queries at serve time.
+// ur.io: settlement epoch accumulators plus cumulative totals, derived from
+// mimir with instant queries at serve time.
 //
-//	users                      <- max(urnetwork_stats_block_users)
-//	data_gib                   <- sum(increase(urnetwork_connect_transfer_bytes[<block elapsed>])) / 2^30
+//	epoch                      <- max(urnetwork_stats_epoch_number), else the built-in clock below
+//	epoch_start                <- max(urnetwork_stats_epoch_start_seconds), unix seconds
+//	epoch_end                  <- max(urnetwork_stats_epoch_end_seconds), unix seconds, projected
+//	epoch_start_block          <- max(urnetwork_stats_epoch_start_block)
+//	epoch_end_block            <- max(urnetwork_stats_epoch_end_block), the next epoch's first block
+//	block                      <- epoch, a deprecated alias kept for older consumers
+//	users                      <- max(urnetwork_stats_epoch_users)
+//	data_gib                   <- sum(increase(urnetwork_connect_transfer_bytes[<epoch elapsed>])) / 2^30
 //	total_networks             <- max(urnetwork_stats_total_networks)
 //	online_providers           <- max(urnetwork_stats_online_providers)
 //	online_extenders           <- max(urnetwork_stats_online_extenders)
@@ -19,19 +25,34 @@ package main
 //	online_extenders_dualstack <- the same gauge with ip_family="dualstack"
 //	countries                  <- max(urnetwork_stats_countries)
 //	staked_alpha               <- max(urnetwork_stats_staked_alpha)
-//	demand_deposits_alpha      <- max(urnetwork_stats_block_demand_deposits_alpha)
-//	miner_emissions_alpha      <- max(urnetwork_stats_block_miner_emissions_alpha)
+//	demand_deposits_alpha      <- max(urnetwork_stats_epoch_demand_deposits_alpha)
+//	miner_emissions_alpha      <- max(urnetwork_stats_epoch_miner_emissions_alpha)
 //	alpha_usd                  <- max(urnetwork_stats_alpha_usd)
-//	prev_users                 <- max(urnetwork_stats_prev_block_users)
-//	prev_data_gib              <- the transfer counter over the previous block window (offset)
-//	prev_demand_deposits_alpha <- max(urnetwork_stats_prev_block_demand_deposits_alpha)
-//	prev_miner_emissions_alpha <- max(urnetwork_stats_prev_block_miner_emissions_alpha)
+//	prev_users                 <- max(urnetwork_stats_prev_epoch_users)
+//	prev_data_gib              <- the transfer counter over the previous epoch's window (offset)
+//	prev_demand_deposits_alpha <- max(urnetwork_stats_prev_epoch_demand_deposits_alpha)
+//	prev_miner_emissions_alpha <- max(urnetwork_stats_prev_epoch_miner_emissions_alpha)
 //
-// the prev_* fields carry the last FINISHED block: the block accumulators
-// reset at every rollover, so consumers show the finished block next to
-// the running one as a stable reference. during block 1 there is no
-// finished block and the prev_* series have no samples, so the fields
-// self-omit
+// the window is the SN25 settlement epoch: the span of chain blocks the
+// subnet coordinator (0xC18925925E2B7bb9059b7d696b8c92762AE86406) counts as
+// one epoch, numbered from 0. the server repo's stats collector reads the
+// coordinator's schedule and the finalized chain head, and publishes the
+// current epoch as the urnetwork_stats_epoch_* gauges: its blocks, its start
+// block's timestamp, and its end projected from the head at 12 s a block. the
+// feed takes the epoch from those gauges. while they have no samples (a
+// collector deployed before the epoch clock, or none running) the feed falls
+// back to the mainnet schedule built in below, projected from epoch 1's
+// start; the collector's epoch accumulators are then absent too, so the
+// epoch fields still serve and the accumulators self-omit rather than
+// describe some other window
+//
+// the prev_* fields carry the last FINISHED epoch: the epoch accumulators
+// reset at every rollover, so consumers show the finished epoch next to the
+// running one as a stable reference. during epoch 0 there is no finished
+// epoch and the prev_* fields are not queried, so they self-omit. the
+// collector publishes prev_users only from a snapshot it took of that epoch
+// itself, so prev_users also self-omits until the first rollover after the
+// collector's deploy
 //
 // the extender and ip family fields carry the extender network (the
 // connect repo's EXTENDER.md, section M). an online extender is an active
@@ -43,7 +64,7 @@ package main
 //
 // the urnetwork_stats_* gauges are pushed by the server repo's stats
 // collector (controller.StartStatsCollector in the server repo) already
-// scoped to the block window. every collector host recomputes and pushes
+// scoped to the epoch window. every collector host recomputes and pushes
 // the same value, but a pushed registry can carry a gauge a host never
 // set, so max — never avg or sum — is the aggregation that reads the real
 // value without double counting or zero skew. pushed series go stale in
@@ -66,30 +87,192 @@ import (
 	"github.com/urnetwork/warp"
 )
 
-// the application layer block clock: 1-based, 7 days per block, every
-// block opening and closing at 00:00 UTC Sunday. block 1 opened Sunday
-// June 28 2026 — the Sunday of the launch week. this must match the
-// consumer's clock (ur.xyz react/src/lib/network.js BLOCK_GENESIS_MS)
-var statsBlockGenesis = time.Date(2026, time.June, 28, 0, 0, 0, 0, time.UTC)
-
-const statsBlockDuration = 7 * 24 * time.Hour
-
 const statsFeedTtl = 15 * time.Second
 const statsQueryTimeout = 10 * time.Second
 
-// statsBlockAt returns the 1-based block number and the block start at
-// now. before the genesis the clock pins to block 1
-func statsBlockAt(now time.Time) (int, time.Time) {
-	elapsed := now.Sub(statsBlockGenesis)
-	if elapsed < 0 {
-		return 1, statsBlockGenesis
-	}
-	index := int(elapsed / statsBlockDuration)
-	return index + 1, statsBlockGenesis.Add(time.Duration(index) * statsBlockDuration)
+// statsEpoch is a settlement epoch: the chain blocks [StartBlock, EndBlock)
+// and their times. HasPrev is false in epoch 0; otherwise the previous
+// epoch ran from PrevStart to Start
+type statsEpoch struct {
+	Number     uint64
+	StartBlock uint64
+	EndBlock   uint64
+	Start      time.Time
+	End        time.Time
+	HasPrev    bool
+	PrevStart  time.Time
 }
 
-// statsQueries returns the mimir instant query for each contract field
-func statsQueries(env string, blockElapsed time.Duration) map[string]string {
+// statsEpochPolicy is one policy of the coordinator's schedule: from
+// EffectiveEpoch on, epoch e starts at block
+// EffectiveBlock + (e - EffectiveEpoch) * EpochBlocks
+type statsEpochPolicy struct {
+	EffectiveEpoch uint64
+	EffectiveBlock uint64
+	EpochBlocks    uint64
+}
+
+// the built-in clock: the SN25 mainnet coordinator's schedule as launched
+// (policyByIndex 0 and 1). epoch 0 was the 7,200-block bootstrap epoch from
+// block 9,240,028, and the policy the governance Safe scheduled at block
+// 9,240,407 made every epoch from 1 on 50,400 blocks from block 9,247,228.
+// the server repo's controller/stats_epoch_clock.go holds the same schedule
+// and reads the live one from the coordinator
+var statsEpochSchedule = []statsEpochPolicy{
+	{EffectiveEpoch: 0, EffectiveBlock: 9_240_028, EpochBlocks: 7_200},
+	{EffectiveEpoch: 1, EffectiveBlock: 9_247_228, EpochBlocks: 50_400},
+}
+
+// the header timestamps of the mined boundaries the clock knows: epoch 0
+// started at 2026-10-08 18:08:12 UTC and epoch 1 at 2026-10-09 18:09:00 UTC
+var statsEpochBlockTimes = map[uint64]time.Time{
+	9_240_028: time.Unix(1_791_482_892, 0).UTC(),
+	9_247_228: time.Unix(1_791_569_340, 0).UTC(),
+}
+
+// the built-in clock projects every other block from epoch 1's start at 12 s
+// a block. the chain averaged 12.0003 s a block over epoch 1's first 39,298
+// blocks, so the projection drifts by about 15 s an epoch
+const statsEpochAnchorBlock = 9_247_228
+
+var statsEpochAnchorTime = time.Unix(1_791_569_340, 0).UTC()
+
+const statsEpochBlockDuration = 12 * time.Second
+
+// statsEpochPolicyAt is the coordinator's policyAt: the last policy in
+// effect by epoch
+func statsEpochPolicyAt(epoch uint64) (statsEpochPolicy, bool) {
+	for index := len(statsEpochSchedule); index != 0; index -= 1 {
+		if statsEpochSchedule[index-1].EffectiveEpoch <= epoch {
+			return statsEpochSchedule[index-1], true
+		}
+	}
+	return statsEpochPolicy{}, false
+}
+
+// statsEpochStartBlock is the coordinator's epochStartBlock
+func statsEpochStartBlock(epoch uint64) (uint64, bool) {
+	policy, ok := statsEpochPolicyAt(epoch)
+	if !ok {
+		return 0, false
+	}
+	return policy.EffectiveBlock + (epoch-policy.EffectiveEpoch)*policy.EpochBlocks, true
+}
+
+// statsEpochAtBlock is the coordinator's currentEpoch at block; ok is false
+// before the first policy takes effect
+func statsEpochAtBlock(block uint64) (uint64, bool) {
+	for index := len(statsEpochSchedule); index != 0; index -= 1 {
+		policy := statsEpochSchedule[index-1]
+		if policy.EffectiveBlock <= block {
+			return policy.EffectiveEpoch + (block-policy.EffectiveBlock)/policy.EpochBlocks, true
+		}
+	}
+	return 0, false
+}
+
+// statsEpochBlockTime is a known boundary's header timestamp, else the block's
+// time projected from the anchor
+func statsEpochBlockTime(block uint64) time.Time {
+	if blockTime, ok := statsEpochBlockTimes[block]; ok {
+		return blockTime
+	}
+	return statsEpochAnchorTime.Add(time.Duration(int64(block)-statsEpochAnchorBlock) * statsEpochBlockDuration)
+}
+
+// statsEpochBlockAt is the block the chain is projected to be at, at `at`:
+// the last block whose projected time is not after it
+func statsEpochBlockAt(at time.Time) uint64 {
+	if !at.Before(statsEpochAnchorTime) {
+		return statsEpochAnchorBlock + uint64(at.Sub(statsEpochAnchorTime)/statsEpochBlockDuration)
+	}
+	back := uint64((statsEpochAnchorTime.Sub(at) + statsEpochBlockDuration - 1) / statsEpochBlockDuration)
+	if statsEpochAnchorBlock < back {
+		return 0
+	}
+	return statsEpochAnchorBlock - back
+}
+
+// statsEpochAt is the built-in clock's epoch at now. before the schedule's
+// first block it pins to epoch 0, not yet open
+func statsEpochAt(now time.Time) statsEpoch {
+	number, ok := statsEpochAtBlock(statsEpochBlockAt(now))
+	if !ok {
+		number = statsEpochSchedule[0].EffectiveEpoch
+	}
+	policy, _ := statsEpochPolicyAt(number)
+	start, _ := statsEpochStartBlock(number)
+	epoch := statsEpoch{
+		Number:     number,
+		StartBlock: start,
+		EndBlock:   start + policy.EpochBlocks,
+		Start:      statsEpochBlockTime(start),
+		End:        statsEpochBlockTime(start + policy.EpochBlocks),
+	}
+	if 0 < number {
+		if prevStart, ok := statsEpochStartBlock(number - 1); ok {
+			epoch.HasPrev = true
+			epoch.PrevStart = statsEpochBlockTime(prevStart)
+		}
+	}
+	return epoch
+}
+
+// statsWholeNumber reads a gauge value as a whole number that a float64
+// carries exactly
+func statsWholeNumber(value *float64) (uint64, bool) {
+	if value == nil || *value < 0 || (1<<53) < *value || *value != math.Trunc(*value) {
+		return 0, false
+	}
+	return uint64(*value), true
+}
+
+// statsEpochFromGauges is the epoch the collector publishes, when its clock
+// gauges all have samples and describe one epoch. max across the collector
+// hosts reads the newest epoch in each gauge, and every clock gauge rises
+// with the epoch, so the maxima belong together
+func statsEpochFromGauges(values map[string]*float64) (statsEpoch, bool) {
+	number, numberOk := statsWholeNumber(values["epoch"])
+	start, startOk := statsWholeNumber(values["epoch_start"])
+	end, endOk := statsWholeNumber(values["epoch_end"])
+	startBlock, startBlockOk := statsWholeNumber(values["epoch_start_block"])
+	endBlock, endBlockOk := statsWholeNumber(values["epoch_end_block"])
+	if !numberOk || !startOk || !endOk || !startBlockOk || !endBlockOk || end <= start || endBlock <= startBlock {
+		return statsEpoch{}, false
+	}
+	epoch := statsEpoch{
+		Number:     number,
+		StartBlock: startBlock,
+		EndBlock:   endBlock,
+		Start:      time.Unix(int64(start), 0).UTC(),
+		End:        time.Unix(int64(end), 0).UTC(),
+	}
+	if prevStart, ok := statsWholeNumber(values["prev_epoch_start"]); ok && 0 < number && prevStart < start {
+		epoch.HasPrev = true
+		epoch.PrevStart = time.Unix(int64(prevStart), 0).UTC()
+	}
+	return epoch, true
+}
+
+// statsEpochQueries returns the mimir instant queries for the epoch the
+// collector publishes
+func statsEpochQueries(env string) map[string]string {
+	m := func(metric string) string {
+		return fmt.Sprintf(`max(%s{env=%q})`, metric, env)
+	}
+	return map[string]string{
+		"epoch":             m("urnetwork_stats_epoch_number"),
+		"epoch_start":       m("urnetwork_stats_epoch_start_seconds"),
+		"epoch_end":         m("urnetwork_stats_epoch_end_seconds"),
+		"epoch_start_block": m("urnetwork_stats_epoch_start_block"),
+		"epoch_end_block":   m("urnetwork_stats_epoch_end_block"),
+		"prev_epoch_start":  m("urnetwork_stats_prev_epoch_start_seconds"),
+	}
+}
+
+// statsQueries returns the mimir instant query for each contract field,
+// windowed by epoch at now
+func statsQueries(env string, epoch statsEpoch, now time.Time) map[string]string {
 	m := func(metric string) string {
 		return fmt.Sprintf(`max(%s{env=%q})`, metric, env)
 	}
@@ -106,18 +289,15 @@ func statsQueries(env string, blockElapsed time.Duration) map[string]string {
 	// values read as resets and increase() inflated by the old counter's
 	// total on every interleave. the matcher also fences off that
 	// corrupted unlabeled history: a window that spans the cutover counts
-	// only labeled traffic and becomes exact at the next block rollover
+	// only labeled traffic and becomes exact at the next epoch rollover
 	transferSelector := fmt.Sprintf(`urnetwork_connect_transfer_bytes{env=%q,instance!=""}`, env)
 
+	elapsedSeconds := int64(now.Sub(epoch.Start) / time.Second)
 	// increase() needs a window wide enough to hold two samples; right
-	// after a block opens the accumulators are ~0 anyway
-	windowSeconds := max(int64(blockElapsed/time.Second), 60)
-	// the previous block is the full block duration ending at the current
-	// block's open — an offset instant query. before the genesis the
-	// offset window predates every sample and the field self-omits
-	offsetSeconds := max(int64(blockElapsed/time.Second), 0)
-	return map[string]string{
-		"users":                      m("urnetwork_stats_block_users"),
+	// after an epoch starts the accumulators are ~0 anyway
+	windowSeconds := max(elapsedSeconds, 60)
+	queries := map[string]string{
+		"users":                      m("urnetwork_stats_epoch_users"),
 		"data_gib":                   fmt.Sprintf(`sum(increase(%s[%ds])) / (1024 * 1024 * 1024)`, transferSelector, windowSeconds),
 		"total_networks":             m("urnetwork_stats_total_networks"),
 		"online_providers":           m("urnetwork_stats_online_providers"),
@@ -130,26 +310,44 @@ func statsQueries(env string, blockElapsed time.Duration) map[string]string {
 		"online_extenders_dualstack": mFamily("urnetwork_stats_online_extenders_by_ip_family", "dualstack"),
 		"countries":                  m("urnetwork_stats_countries"),
 		"staked_alpha":               m("urnetwork_stats_staked_alpha"),
-		"demand_deposits_alpha":      m("urnetwork_stats_block_demand_deposits_alpha"),
-		"miner_emissions_alpha":      m("urnetwork_stats_block_miner_emissions_alpha"),
+		"demand_deposits_alpha":      m("urnetwork_stats_epoch_demand_deposits_alpha"),
+		"miner_emissions_alpha":      m("urnetwork_stats_epoch_miner_emissions_alpha"),
 		"alpha_usd":                  m("urnetwork_stats_alpha_usd"),
-		"prev_users":                 m("urnetwork_stats_prev_block_users"),
-		"prev_data_gib": fmt.Sprintf(
+	}
+	if epoch.HasPrev {
+		// the previous epoch is its whole span, from its start to the
+		// current epoch's start — an offset instant query. epoch 0 was one
+		// day, every later epoch about seven
+		prevSeconds := max(int64(epoch.Start.Sub(epoch.PrevStart)/time.Second), 60)
+		offsetSeconds := max(elapsedSeconds, 0)
+		queries["prev_users"] = m("urnetwork_stats_prev_epoch_users")
+		queries["prev_data_gib"] = fmt.Sprintf(
 			`sum(increase(%s[%ds] offset %ds)) / (1024 * 1024 * 1024)`,
 			transferSelector,
-			int64(statsBlockDuration/time.Second),
+			prevSeconds,
 			offsetSeconds,
-		),
-		"prev_demand_deposits_alpha": m("urnetwork_stats_prev_block_demand_deposits_alpha"),
-		"prev_miner_emissions_alpha": m("urnetwork_stats_prev_block_miner_emissions_alpha"),
+		)
+		queries["prev_demand_deposits_alpha"] = m("urnetwork_stats_prev_epoch_demand_deposits_alpha")
+		queries["prev_miner_emissions_alpha"] = m("urnetwork_stats_prev_epoch_miner_emissions_alpha")
 	}
+	return queries
 }
 
 // the operator stats contract fields. a nil field had no samples in mimir
 // (collector not deployed, series stale, or pre-launch) and is omitted
 // from the json
 type statsSnapshot struct {
-	Block               int      `json:"block"`
+	// the current settlement epoch (see the package comment): its number,
+	// its start and end as unix seconds (the end projected), and its first
+	// block and the next epoch's. block is the deprecated name of epoch and
+	// always equals it
+	Block           uint64 `json:"block"`
+	Epoch           uint64 `json:"epoch"`
+	EpochStart      int64  `json:"epoch_start"`
+	EpochEnd        int64  `json:"epoch_end"`
+	EpochStartBlock uint64 `json:"epoch_start_block"`
+	EpochEndBlock   uint64 `json:"epoch_end_block"`
+
 	Users               *float64 `json:"users,omitempty"`
 	DataGib             *float64 `json:"data_gib,omitempty"`
 	TotalNetworks       *float64 `json:"total_networks,omitempty"`
@@ -170,11 +368,23 @@ type statsSnapshot struct {
 	OnlineExtendersIpv6      *float64 `json:"online_extenders_ipv6,omitempty"`
 	OnlineExtendersDualstack *float64 `json:"online_extenders_dualstack,omitempty"`
 
-	// the last finished block (see the package comment)
+	// the last finished epoch (see the package comment)
 	PrevUsers               *float64 `json:"prev_users,omitempty"`
 	PrevDataGib             *float64 `json:"prev_data_gib,omitempty"`
 	PrevDemandDepositsAlpha *float64 `json:"prev_demand_deposits_alpha,omitempty"`
 	PrevMinerEmissionsAlpha *float64 `json:"prev_miner_emissions_alpha,omitempty"`
+}
+
+// statsEpochSnapshot is a snapshot with only the epoch fields
+func statsEpochSnapshot(epoch statsEpoch) statsSnapshot {
+	return statsSnapshot{
+		Block:           epoch.Number,
+		Epoch:           epoch.Number,
+		EpochStart:      epoch.Start.Unix(),
+		EpochEnd:        epoch.End.Unix(),
+		EpochStartBlock: epoch.StartBlock,
+		EpochEndBlock:   epoch.EndBlock,
+	}
 }
 
 type statsFeed struct {
@@ -204,7 +414,7 @@ func newStatsFeed(mimirUrl *url.URL, env string) *statsFeed {
 // snapshot returns the feed values, cached for statsFeedTtl. a refresh is
 // all or nothing so a mimir flap can never zero individual accumulators:
 // on error a stale snapshot is served if present, and the error return
-// always carries the current block number
+// always carries the current epoch
 func (self *statsFeed) snapshot(ctx context.Context) (statsSnapshot, error) {
 	self.mu.Lock()
 	if self.haveCached && self.now().Sub(self.cachedAt) < statsFeedTtl {
@@ -232,11 +442,52 @@ func (self *statsFeed) snapshot(ctx context.Context) (statsSnapshot, error) {
 	return snapshot, nil
 }
 
+// refresh reads the epoch the collector publishes, then every field
+// windowed by it
 func (self *statsFeed) refresh(ctx context.Context) (statsSnapshot, error) {
 	now := self.now()
-	blockNumber, blockStart := statsBlockAt(now)
-	queries := statsQueries(self.env, now.Sub(blockStart))
+	epoch := statsEpochAt(now)
+	clock, err := self.queryAll(ctx, statsEpochQueries(self.env))
+	if err != nil {
+		return statsEpochSnapshot(epoch), err
+	}
+	if published, ok := statsEpochFromGauges(clock); ok {
+		epoch = published
+	}
 
+	values, err := self.queryAll(ctx, statsQueries(self.env, epoch, now))
+	if err != nil {
+		return statsEpochSnapshot(epoch), err
+	}
+	snapshot := statsEpochSnapshot(epoch)
+	snapshot.Users = values["users"]
+	snapshot.DataGib = values["data_gib"]
+	snapshot.TotalNetworks = values["total_networks"]
+	snapshot.OnlineProviders = values["online_providers"]
+	snapshot.Countries = values["countries"]
+	snapshot.StakedAlpha = values["staked_alpha"]
+	snapshot.DemandDepositsAlpha = values["demand_deposits_alpha"]
+	snapshot.MinerEmissionsAlpha = values["miner_emissions_alpha"]
+	snapshot.AlphaUsd = values["alpha_usd"]
+
+	snapshot.OnlineExtenders = values["online_extenders"]
+	snapshot.OnlineProvidersIpv4 = values["online_providers_ipv4"]
+	snapshot.OnlineProvidersIpv6 = values["online_providers_ipv6"]
+	snapshot.OnlineProvidersDualstack = values["online_providers_dualstack"]
+	snapshot.OnlineExtendersIpv4 = values["online_extenders_ipv4"]
+	snapshot.OnlineExtendersIpv6 = values["online_extenders_ipv6"]
+	snapshot.OnlineExtendersDualstack = values["online_extenders_dualstack"]
+
+	snapshot.PrevUsers = values["prev_users"]
+	snapshot.PrevDataGib = values["prev_data_gib"]
+	snapshot.PrevDemandDepositsAlpha = values["prev_demand_deposits_alpha"]
+	snapshot.PrevMinerEmissionsAlpha = values["prev_miner_emissions_alpha"]
+	return snapshot, nil
+}
+
+// queryAll runs the queries concurrently. a field whose query matches no
+// samples is absent from the result; any query error fails the whole set
+func (self *statsFeed) queryAll(ctx context.Context, queries map[string]string) (map[string]*float64, error) {
 	var mu sync.Mutex
 	values := map[string]*float64{}
 	var firstErr error
@@ -260,35 +511,10 @@ func (self *statsFeed) refresh(ctx context.Context) (statsSnapshot, error) {
 		}()
 	}
 	wg.Wait()
-
 	if firstErr != nil {
-		return statsSnapshot{Block: blockNumber}, firstErr
+		return nil, firstErr
 	}
-	return statsSnapshot{
-		Block:               blockNumber,
-		Users:               values["users"],
-		DataGib:             values["data_gib"],
-		TotalNetworks:       values["total_networks"],
-		OnlineProviders:     values["online_providers"],
-		Countries:           values["countries"],
-		StakedAlpha:         values["staked_alpha"],
-		DemandDepositsAlpha: values["demand_deposits_alpha"],
-		MinerEmissionsAlpha: values["miner_emissions_alpha"],
-		AlphaUsd:            values["alpha_usd"],
-
-		OnlineExtenders:          values["online_extenders"],
-		OnlineProvidersIpv4:      values["online_providers_ipv4"],
-		OnlineProvidersIpv6:      values["online_providers_ipv6"],
-		OnlineProvidersDualstack: values["online_providers_dualstack"],
-		OnlineExtendersIpv4:      values["online_extenders_ipv4"],
-		OnlineExtendersIpv6:      values["online_extenders_ipv6"],
-		OnlineExtendersDualstack: values["online_extenders_dualstack"],
-
-		PrevUsers:               values["prev_users"],
-		PrevDataGib:             values["prev_data_gib"],
-		PrevDemandDepositsAlpha: values["prev_demand_deposits_alpha"],
-		PrevMinerEmissionsAlpha: values["prev_miner_emissions_alpha"],
-	}, nil
+	return values, nil
 }
 
 // query runs an instant query and returns the single scalar result.

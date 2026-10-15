@@ -71,8 +71,9 @@ import (
 // alert rules for grafana unified alerting, written to the
 // provisioning/alerting dir at start (see renderGrafanaConfig).
 // the rules query the provisioned warp-mimir datasource.
-// contact points and notification policies are not provisioned:
-// they are managed in the grafana ui and live in the grafana database
+// contact points and notification policies are not file provisioned: they
+// live in the grafana database, written through the provisioning API by
+// `bringyourctl grafana reconcile-alerting` (server repo) and in the ui
 //
 //go:embed alerting/*.yml
 var alertingFs embed.FS

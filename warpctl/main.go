@@ -66,7 +66,7 @@ Usage:
     warpctl deploy <env> <service>
         (latest-local | latest-beta | latest | <version>)
         (<blocks>... | --percent=<percent>)
-        [--only-older] [--timeout=<timeout>]
+        [--only-older] [--initialize-unset] [--timeout=<timeout>]
         [--set-latest]
     warpctl deploy-local <env> <service> [--percent=<percent>]
     warpctl deploy-beta <env> <service> [--percent=<percent>]
@@ -185,6 +185,8 @@ Options:
     --cloudflare-token-file=<path>  The file holding the cloudflare api token, else CLOUDFLARE_API_TOKEN or <WARP_HOME>/root/servers/cloudflare.
     --arg=<arg>                Arg to pass to the service binary.
     --only-older               Only update blocks with entirely older versions.
+    --initialize-unset         With --only-older, initialize absent deployment records without latest tags.
+                               Exact same-version initializations are no-ops. Cannot use --set-latest.
     --repo                     List versions from the docker repo.
     --sample                   List versions from sampling deployed status (the method used by deploy).
     --timeout=<timeout>        Convergence timeout as a duration (default 120s).
@@ -575,10 +577,17 @@ func importImage(opts docopt.Opts) {
 
 var deployPollBlockStatusUntil = pollLbBlockStatusUntil
 var deployPollServiceStatusUntil = pollLbServiceStatusUntil
+var deploySampleBlockCurrentVersions = sampleBlockCurrentVersions
 
 func deploy(opts docopt.Opts) {
 	env, _ := opts.String("<env>")
 	service, _ := opts.String("<service>")
+	onlyOlder, _ := opts.Bool("--only-older")
+	initializeUnset, _ := opts.Bool("--initialize-unset")
+	setLatest, _ := opts.Bool("--set-latest")
+	if initializeUnset && (!onlyOlder || setLatest) {
+		panic("--initialize-unset requires --only-older and cannot be combined with --set-latest.")
+	}
 
 	state := getWarpState()
 
@@ -687,12 +696,20 @@ func deploy(opts docopt.Opts) {
 		panic("No matching blocks.")
 	}
 
-	if onlyOlder, _ := opts.Bool("--only-older"); onlyOlder {
-		blockCurrentVersions, err := sampleBlockCurrentVersions(env, service, deployBlocks...)
-		if err != nil {
-			panic(fmt.Errorf("--only-older cannot verify running versions: %w", err))
+	initializeBlocks := map[string]bool{}
+	if onlyOlder {
+		var filteredDeployBlocks []string
+		if initializeUnset {
+			filteredDeployBlocks, initializeBlocks, err = prepareInitializedDeployment(
+				context.Background(), dc, env, service, deployVersion, deployBlocks, deploySampleBlockCurrentVersions,
+			)
+		} else {
+			var blockCurrentVersions map[string]map[semver.Version]float32
+			blockCurrentVersions, err = deploySampleBlockCurrentVersions(env, service, deployBlocks...)
+			if err == nil {
+				filteredDeployBlocks, err = filterOlderDeployBlocks(deployVersion, deployBlocks, blockCurrentVersions)
+			}
 		}
-		filteredDeployBlocks, err := filterOlderDeployBlocks(deployVersion, deployBlocks, blockCurrentVersions)
 		if err != nil {
 			panic(fmt.Errorf("--only-older cannot verify running versions: %w", err))
 		}
@@ -703,24 +720,30 @@ func deploy(opts docopt.Opts) {
 		deployBlocks = filteredDeployBlocks
 	}
 
+	imageName := fmt.Sprintf("%s/%s-%s", state.warpSettings.RequireDockerNamespace(), env, service)
+	sourceImageName := fmt.Sprintf("%s:%s", imageName, convertVersionToDocker(deployVersion))
+	if len(initializeBlocks) != 0 {
+		// Prove the versioned image exists before any selector can start it.
+		// The worker pulls this immutable version, not a <block>-latest tag.
+		cmd := docker("buildx", "imagetools", "inspect", sourceImageName)
+		cmd.Dir = state.warpVersionHome
+		if err := runAndLog(cmd); err != nil {
+			panic(fmt.Errorf("cannot verify initial deployment image: %w", err))
+		}
+	}
+
 	announceDeployStarted(env, service, deployBlocks, deployVersion)
 
 	for _, block := range deployBlocks {
+		if initializeBlocks[block] {
+			if err := dc.InitializeVersion(context.Background(), env, service, block, deployVersion); err != nil {
+				panic(err)
+			}
+			Err.Printf("Initialized %s block %s to %s through its deployment selector; latest tag unchanged.", service, block, deployVersion)
+			continue
+		}
 		// remove tag <block>-latest from current image
 		// tag target image with <block>-latest
-
-		imageName := fmt.Sprintf(
-			"%s/%s-%s",
-			state.warpSettings.RequireDockerNamespace(),
-			env,
-			service,
-		)
-
-		sourceImageName := fmt.Sprintf(
-			"%s:%s",
-			imageName,
-			convertVersionToDocker(deployVersion),
-		)
 		deployImageName := fmt.Sprintf(
 			"%s:%s-latest",
 			imageName,
@@ -740,7 +763,7 @@ func deploy(opts docopt.Opts) {
 
 		Err.Printf("Deployed %s -> %s\n", sourceImageName, deployImageName)
 	}
-	if setLatest, _ := opts.Bool("--set-latest"); setLatest {
+	if setLatest {
 		imageName := fmt.Sprintf(
 			"%s/%s-%s",
 			state.warpSettings.RequireDockerNamespace(),

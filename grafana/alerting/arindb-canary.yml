@@ -10,11 +10,16 @@
 # signal §2.9d (server monitor/SIGNALS.md) reads the same series, pages on the
 # same two rules, and names the countries the latest database would empty.
 #
-# a fallback serves the old database's quality classification; risk always
+# a fallback serves the old database's quality classification and latches on
+# its pair of databases until comparisons pass with a margin; risk always
 # follows the latest database, so a speed or online loss, which only risk can
-# cause, pages without an automatic repair. a missing series is OK here: a
-# build without the canary exports none, and a stalled indexer keeps its last
-# decision time, which the stale rule catches.
+# cause, pages without an automatic repair. the breaker trips only on a net
+# quality loss, so gains, gross churn, a cohort that shrinks before the canary
+# can compare it, a tripped warming comparison, a lost protection and a serving
+# epoch switching back and forth page separately. loss, gain and churn page
+# only with at least 20 paired providers of old supply in the bucket. a missing
+# series is OK here: a build without the canary exports none, and a stalled
+# indexer keeps its last decision time, which the stale rules catch.
 #
 # only rules are provisioned here: contact points and notification policies
 # are managed in the grafana ui. rules fire with a severity label (page | warn)
@@ -93,7 +98,7 @@ groups:
             datasourceUid: warp-mimir
             model:
               editorMode: code
-              expr: max by (env, bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed|online"})
+              expr: max by (env, bucket) (urnetwork_stats_arindb_loss_ratio{bucket=~"speed|online"}) and on (env, bucket) (max by (env, bucket) (urnetwork_stats_arindb_providers{database="old",bucket=~"speed|online"}) >= 20)
               instant: true
               range: false
               intervalMs: 1000
@@ -295,4 +300,436 @@ groups:
           severity: warn
         annotations:
           summary: The last {{ $labels.env }} ARIN canary decision is {{ $values.A }}s old; the score export is stalled. The decision expires with the publication, after which readers serve each provider's latest ARIN slot.
+        isPaused: false
+      # a decision 90 minutes old is a stalled score export: a fallback is no
+      # longer re-decided, and the decision expires with the publication
+      - uid: arindb-decision-stalled
+        title: ArinDbDecisionStalled
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: time() - max by (env) (urnetwork_stats_arindb_decision_seconds)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 5400
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: The last {{ $labels.env }} ARIN canary decision is {{ $values.A }}s old, past 90 minutes; the score export is stalled. Investigate update_client_scores at once.
+        isPaused: false
+      # the breaker trips only on losses: a large net gain is a flood, such as
+      # hosting or vpn ranges a source stopped supplying
+      - uid: arindb-supply-gain
+        title: ArinDbSupplyGain
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env, bucket) (urnetwork_stats_arindb_gain_ratio) and on (env, bucket) (max by (env, bucket) (urnetwork_stats_arindb_providers{database="old"}) >= 20)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.1
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: The latest ARIN database adds {{ $values.A }} of {{ $labels.env }} {{ $labels.bucket }} supply against the old one. Compare the release's catalog audit and source counts with the previous release's.
+        isPaused: false
+      # the net loss hides a release that moves as many providers out of a
+      # bucket as into it
+      - uid: arindb-supply-churn
+        title: ArinDbSupplyChurn
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env, bucket) (urnetwork_stats_arindb_churn_ratio) and on (env, bucket) (max by (env, bucket) (urnetwork_stats_arindb_providers{database="old"}) >= 20)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.2
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: The latest ARIN database moves {{ $values.A }} of {{ $labels.env }} {{ $labels.bucket }} supply in or out against the old one. Review the release's rule and source changes.
+        isPaused: false
+      # warming with a paired sample large enough to judge that trips: the
+      # latest is held out before the cohort is covered
+      - uid: arindb-warming-tripped
+        title: ArinDbWarmingTripped
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env) (urnetwork_stats_arindb_decision_flags{flag="warming_tripped"})
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: The {{ $labels.env }} ARIN canary is warming and its paired sample trips the breaker, so the latest is held out. Judge the release from the losses on the providers dashboard and pin the last good arin.mmdb with ARIN_PREVIOUS_DATABASE_FILE if it is bad.
+        isPaused: false
+      # the publishing taskworker cannot open its latest database, or the
+      # canary went single right after a fallback
+      - uid: arindb-protection-lost
+        title: ArinDbProtectionLost
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env, flag) (urnetwork_stats_arindb_decision_flags{flag=~"latest_unavailable|fallback_dropped"})
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: The {{ $labels.env }} ARIN canary lost its protection ({{ $labels.flag }}). Monitor signal §2.9d names the next step.
+        isPaused: false
+      # a provider whose latest lookup fails never reaches the cohort, so the
+      # comparison cannot see it
+      - uid: arindb-cohort-shrink
+        title: ArinDbCohortShrink
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env) (urnetwork_stats_arindb_cohort_loss_ratio) and on (env) (max by (env) (urnetwork_stats_arindb_cohort_providers{reference="reference"}) >= 100)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.1
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: The {{ $labels.env }} ARIN canary's cohort is {{ $values.A }} below its largest of the last two hours. Check urnetwork_arin_lookup_errors_total for latest lookups that fail.
+        isPaused: false
+      # each change switches every provider's quality classification between
+      # the databases; a latch and warming's previous choice keep it rare
+      - uid: arindb-serving-flapping
+        title: ArinDbServingFlapping
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env) (urnetwork_stats_arindb_serving_changes)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 4
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: The {{ $labels.env }} ARIN serving epoch changed {{ $values.A }} times in six hours. Accept the latest with provider.yml arindb_canary.accept_latest_build_epoch or pin the last good release.
+        isPaused: false
+      # readers that miss the decision serve each provider's latest slot, or
+      # their last decision for up to 15 minutes after a redis error
+      - uid: arindb-decision-reads-not-ok
+        title: ArinDbDecisionReadsNotOk
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: sum by (env) (rate(urnetwork_arindb_decision_reads_total{outcome!="ok"}[10m])) / sum by (env) (rate(urnetwork_arindb_decision_reads_total[10m]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.05
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: A share of {{ $values.A }} of {{ $labels.env }} ARIN canary decision reads were not ok over ten minutes. Split urnetwork_arindb_decision_reads_total by outcome on the services overview.
         isPaused: false

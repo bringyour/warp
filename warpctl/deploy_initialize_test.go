@@ -207,10 +207,11 @@ func TestInitializeUnsetRequiresExplicitCompatibleOptions(t *testing.T) {
 	}
 	t.Run("ordinary_only_older_still_rejects_missing_status", func(t *testing.T) {
 		f := newInitializationFixture(t)
+		f.items["beta"] = initializationItem("1.0.0", "")
 		if failure := f.deploy("svc-a", "--percent=25", "--only-older", "--timeout=0"); failure == nil {
 			t.Fatal("ordinary only-older initialized a block")
 		}
-		f.assertEvents(t, []string{"sample:beta"})
+		f.assertEvents(t, []string{"read:beta", "sample:beta"})
 	})
 }
 
@@ -330,7 +331,7 @@ func TestInitializeUnsetOrdinaryPromotionRemovesMarker(t *testing.T) {
 	if failure := f.run(25); failure != nil {
 		t.Fatalf("ordinary promotion failed: %v", failure)
 	}
-	f.assertEvents(t, []string{"read:beta", "sample:beta", "tag:fixture/test-svc-a:beta-latest<-fixture/test-svc-a:2.0.0", "version:beta"})
+	f.assertEvents(t, []string{"read:beta", "sample:beta", "inspect", "tag:fixture/test-svc-a:beta-latest<-fixture/test-svc-a:2.0.0", "version:beta"})
 	f.assertItem(t, "beta", "2.0.0", "")
 }
 

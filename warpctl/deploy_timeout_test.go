@@ -59,6 +59,15 @@ func newDeployTimeoutFixture(t *testing.T, failAt string) *deployTimeoutFixture 
 		return nil
 	}
 	selector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Amz-Target") == "DynamoDB_20120810.GetItem" {
+			var read struct{ ConsistentRead bool }
+			if err := json.NewDecoder(r.Body).Decode(&read); err != nil || !read.ConsistentRead {
+				t.Errorf("selector read must be strongly consistent: %+v, %v", read, err)
+			}
+			w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+			io.WriteString(w, `{"Item":{"version":{"S":"1.0.0"}}}`)
+			return
+		}
 		if r.Header.Get("X-Amz-Target") != "DynamoDB_20120810.PutItem" {
 			t.Errorf("unexpected selector operation %q", r.Header.Get("X-Amz-Target"))
 			http.Error(w, "unexpected operation", http.StatusBadRequest)
@@ -113,6 +122,9 @@ func newDeployTimeoutFixture(t *testing.T, failAt string) *deployTimeoutFixture 
 		args := cmd.Args
 		if filepath.Base(args[0]) == "sudo" {
 			args = args[1:]
+		}
+		if len(args) == 5 && filepath.Base(args[0]) == "docker" && slices.Equal(args[1:4], []string{"buildx", "imagetools", "inspect"}) && cmd.Dir == home {
+			return nil // read-only image verification, not a promotion event
 		}
 		if len(args) != 7 || filepath.Base(args[0]) != "docker" ||
 			!slices.Equal(args[1:5], []string{"buildx", "imagetools", "create", "-t"}) || cmd.Dir != home {

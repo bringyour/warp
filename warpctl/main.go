@@ -67,12 +67,14 @@ Usage:
         (latest-local | latest-beta | latest | <version>)
         (<blocks>... | --percent=<percent>)
         [--only-older] [--initialize-unset] [--timeout=<timeout>]
+        [--preflight] [--allow-missing-image]
         [--set-latest]
     warpctl deploy-local <env> <service> [--percent=<percent>]
     warpctl deploy-beta <env> <service> [--percent=<percent>]
     warpctl deploy-release <env> <service> [--percent=<percent>]
     warpctl ls version [-b] [-d]
     warpctl ls version-code
+    warpctl ls docker-namespace
     warpctl ls services [<env>]
     warpctl ls service-blocks [<env> [<service>]]
     warpctl ls versions <env> [<service> [<blocks>...]] [--sample | --repo]
@@ -186,6 +188,8 @@ Options:
     --arg=<arg>                Arg to pass to the service binary.
     --only-older               Only update blocks with entirely older versions.
     --initialize-unset         With --only-older, initialize absent deployment records without latest tags.
+    --preflight                Read deployment guards and selectors, then exit before any mutation or announcement.
+    --allow-missing-image      Only with --preflight: omit the future versioned-image check before building.
                                Exact same-version initializations are no-ops. Cannot use --set-latest.
     --repo                     List versions from the docker repo.
     --sample                   List versions from sampling deployed status (the method used by deploy).
@@ -227,7 +231,9 @@ Options:
 	} else if deployRelease_, _ := opts.Bool("deploy-release"); deployRelease_ {
 		deployRelease(opts)
 	} else if ls, _ := opts.Bool("ls"); ls {
-		if version, _ := opts.Bool("version"); version {
+		if namespace, _ := opts.Bool("docker-namespace"); namespace {
+			Out.Printf("%s\n", getWarpState().warpSettings.RequireDockerNamespace())
+		} else if version, _ := opts.Bool("version"); version {
 			lsVersion(opts)
 		} else if versionCode, _ := opts.Bool("version-code"); versionCode {
 			lsVersionCode(opts)
@@ -585,6 +591,11 @@ func deploy(opts docopt.Opts) {
 	onlyOlder, _ := opts.Bool("--only-older")
 	initializeUnset, _ := opts.Bool("--initialize-unset")
 	setLatest, _ := opts.Bool("--set-latest")
+	preflight, _ := opts.Bool("--preflight")
+	allowMissingImage, _ := opts.Bool("--allow-missing-image")
+	if allowMissingImage && !preflight {
+		panic("--allow-missing-image requires --preflight.")
+	}
 	if initializeUnset && (!onlyOlder || setLatest) {
 		panic("--initialize-unset requires --only-older and cannot be combined with --set-latest.")
 	}
@@ -695,6 +706,24 @@ func deploy(opts docopt.Opts) {
 	if len(deployBlocks) == 0 {
 		panic("No matching blocks.")
 	}
+	// The dry run and real deployment share selector/readiness checks. Neither
+	// an HTTP 404 nor an eventually consistent read proves a bootstrap is safe.
+	if !initializeUnset || preflight {
+		versions, err := verifyDeploymentSelectors(context.Background(), dc, env, service, deployBlocks, initializeUnset)
+		if err != nil {
+			panic(err)
+		}
+		if allowMissingImage {
+			for _, current := range versions {
+				image := fmt.Sprintf("%s/%s-%s:%s", state.warpSettings.RequireDockerNamespace(), env, service, convertVersionToDocker(current))
+				cmd := docker("buildx", "imagetools", "inspect", image)
+				cmd.Dir = state.warpVersionHome
+				if err := runAndLog(cmd); err != nil {
+					panic(fmt.Errorf("cannot read current deployment image during preflight: %w", err))
+				}
+			}
+		}
+	}
 
 	initializeBlocks := map[string]bool{}
 	if onlyOlder {
@@ -722,14 +751,22 @@ func deploy(opts docopt.Opts) {
 
 	imageName := fmt.Sprintf("%s/%s-%s", state.warpSettings.RequireDockerNamespace(), env, service)
 	sourceImageName := fmt.Sprintf("%s:%s", imageName, convertVersionToDocker(deployVersion))
-	if len(initializeBlocks) != 0 {
+	if !allowMissingImage {
 		// Prove the versioned image exists before any selector can start it.
 		// The worker pulls this immutable version, not a <block>-latest tag.
 		cmd := docker("buildx", "imagetools", "inspect", sourceImageName)
 		cmd.Dir = state.warpVersionHome
 		if err := runAndLog(cmd); err != nil {
-			panic(fmt.Errorf("cannot verify initial deployment image: %w", err))
+			panic(fmt.Errorf("cannot verify versioned deployment image: %w", err))
 		}
+	}
+	if preflight {
+		if allowMissingImage {
+			Out.Printf("Preflight passed for %s/%s; future image %s is expected to be built later and was not checked. No mutations performed.", env, service, sourceImageName)
+		} else {
+			Out.Printf("Preflight passed for %s/%s, including versioned image %s. No mutations performed.", env, service, sourceImageName)
+		}
+		return
 	}
 
 	announceDeployStarted(env, service, deployBlocks, deployVersion)

@@ -276,7 +276,9 @@ func TestNginxConfigOverwritesOnlyUrForwardedAddress(t *testing.T) {
 // including from the ur.io web app. A browser sends a request with a custom
 // header only after a CORS preflight that names it, so every generated CORS
 // block must allow the header or every cross-origin SDK request fails.
-func TestNginxConfigCorsAllowsClientInfoHeader(t *testing.T) {
+// The intended-network fence needs its preflight deployed before any client
+// adopts it; the server rejects stale-network credentials with a stable 412.
+func TestNginxConfigCorsAllowsClientIdentityHeaders(t *testing.T) {
 	servicesYaml, err := testServicesFS.ReadFile("testdata/services.yml")
 	if err != nil {
 		t.Fatal(err)
@@ -299,8 +301,10 @@ func TestNginxConfigCorsAllowsClientInfoHeader(t *testing.T) {
 			allowHeadersCount += 1
 			headers := line[i+len(allowHeadersDirective):]
 			headers = headers[:strings.Index(headers, "'")]
-			if !slices.Contains(strings.Split(headers, ","), "X-UR-ClientInfo") {
-				t.Errorf("block %s allows CORS headers %q without X-UR-ClientInfo", blockName, headers)
+			for _, required := range []string{"X-UR-ClientInfo", "X-UR-Intended-Network-Id"} {
+				if !slices.Contains(strings.Split(headers, ","), required) {
+					t.Errorf("block %s allows CORS headers %q without %s", blockName, headers, required)
+				}
 			}
 		}
 	}

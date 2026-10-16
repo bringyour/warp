@@ -2121,7 +2121,7 @@ func (self *NginxConfig) addServiceBlocks() {
 	                                    # see https://enable-cors.org/server_nginx.html
 	                                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
 	                                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-	                                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,X-UR-ClientInfo,Authorization,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
+	                                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,X-UR-ClientInfo,X-UR-Intended-Network-Id,Authorization,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
 	                                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
 	                                    `)
 										// No service is sent credentialed cross-origin requests:

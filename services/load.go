@@ -134,6 +134,9 @@ func LoadServicesConfigFrom(vaultDir string, env string) (*ServicesConfig, error
 	if err := validateRouters(&servicesConfig); err != nil {
 		return nil, fmt.Errorf("services config %s: %w", servicesConfigPath, err)
 	}
+	if err := validateNoAccessLog(&servicesConfig); err != nil {
+		return nil, fmt.Errorf("services config %s: %w", servicesConfigPath, err)
+	}
 
 	for versionIndex, version := range servicesConfig.Versions {
 		if err := validateForwardPorts(version); err != nil {

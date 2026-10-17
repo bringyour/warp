@@ -36,13 +36,22 @@ services --push /metrics/job/...--> 127.0.0.1:<local_port> --> go front --> loca
   `grafana/alerting/` are embedded in the go front and written to
   `provisioning/alerting/` at container start, so they re-provision on every
   deploy ("urnetwork alerts" folder, read only in the ui — edit the yaml and
-  redeploy). Rules carry a `severity` label (`page` | `warn`); contact points
-  and notification policies are not provisioned — set them up in the grafana
-  ui (they live in the env postgres, so they survive redeploys).
+  redeploy). Rules carry a `severity` label (`page` | `warn`).
   This includes contract-failure rate rules backed by the bounded
   `urnetwork_connect_contract_failures_total` counter; the corresponding
   application logs are rate-limited exemplars and must not be used to
   reconstruct failure rates.
+- Contact points and the notification-policy tree are not file provisioned.
+  They live in the env postgres, so they survive redeploys, and stay editable
+  in the ui. `bringyourctl grafana reconcile-alerting` (server repo; also run
+  by `load-defaults`) writes them through Grafana's provisioning API: the
+  `urnetwork-default` contact point, a Slack integration whose webhook is
+  vault `monitor.yml` `alerts.slack_webhook_url`, is the default receiver for
+  every alert no child route matches, and the competition email route is kept.
+  With an empty webhook it leaves the default receiver alone and warns when
+  that receiver has no integrations. `bringyourctl grafana test-alert` sends a
+  test notification through Grafana's stored Slack integration. Grafana has no
+  `[smtp]`, so email contact points cannot send.
 - Grafana state (dashboards, users) lives in the env postgres. Loki and mimir
   data lives in minio. Alloy read positions live in the mount_data volume.
   The containers are otherwise stateless and can be redeployed freely: loki

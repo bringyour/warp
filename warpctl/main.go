@@ -66,13 +66,15 @@ Usage:
     warpctl deploy <env> <service>
         (latest-local | latest-beta | latest | <version>)
         (<blocks>... | --percent=<percent>)
-        [--only-older] [--timeout=<timeout>]
+        [--only-older] [--initialize-unset] [--timeout=<timeout>]
+        [--preflight] [--allow-missing-image]
         [--set-latest]
     warpctl deploy-local <env> <service> [--percent=<percent>]
     warpctl deploy-beta <env> <service> [--percent=<percent>]
     warpctl deploy-release <env> <service> [--percent=<percent>]
     warpctl ls version [-b] [-d]
     warpctl ls version-code
+    warpctl ls docker-namespace
     warpctl ls services [<env>]
     warpctl ls service-blocks [<env> [<service>]]
     warpctl ls versions <env> [<service> [<blocks>...]] [--sample | --repo]
@@ -185,9 +187,14 @@ Options:
     --cloudflare-token-file=<path>  The file holding the cloudflare api token, else CLOUDFLARE_API_TOKEN or <WARP_HOME>/root/servers/cloudflare.
     --arg=<arg>                Arg to pass to the service binary.
     --only-older               Only update blocks with entirely older versions.
+    --initialize-unset         With --only-older, initialize absent deployment records without latest tags.
+    --preflight                Read deployment guards and selectors, then exit before any mutation or announcement.
+    --allow-missing-image      Only with --preflight: omit the future versioned-image check before building.
+                               Exact same-version initializations are no-ops. Cannot use --set-latest.
     --repo                     List versions from the docker repo.
     --sample                   List versions from sampling deployed status (the method used by deploy).
-    --timeout=<timeout>        Timeout in seconds.
+    --timeout=<timeout>        Convergence timeout as a duration (default 120s).
+                               0 promotes the version without polling; negative waits indefinitely.
     --query=<query>            Log query.
    	--since=<since>            Lookback duration (5m, 2h30m) or start timestamp. A timestamp carrying an offset or Z is read at that offset; one without is read in local time, or utc with --utc. A time with no date is today. Accepted: 2006-01-02T15:04:05.999-07:00, 2006-01-02T15:04:05.999, 2006-01-02 15:04, 2006-01-02, 15:04:05, 15:04
    	--limit=<n>                Lookback record count.
@@ -224,7 +231,9 @@ Options:
 	} else if deployRelease_, _ := opts.Bool("deploy-release"); deployRelease_ {
 		deployRelease(opts)
 	} else if ls, _ := opts.Bool("ls"); ls {
-		if version, _ := opts.Bool("version"); version {
+		if namespace, _ := opts.Bool("docker-namespace"); namespace {
+			Out.Printf("%s\n", getWarpState().warpSettings.RequireDockerNamespace())
+		} else if version, _ := opts.Bool("version"); version {
 			lsVersion(opts)
 		} else if versionCode, _ := opts.Bool("version-code"); versionCode {
 			lsVersionCode(opts)
@@ -572,9 +581,24 @@ func importImage(opts docopt.Opts) {
 	}
 }
 
+var deployPollBlockStatusUntil = pollLbBlockStatusUntil
+var deployPollServiceStatusUntil = pollLbServiceStatusUntil
+var deploySampleBlockCurrentVersions = sampleBlockCurrentVersions
+
 func deploy(opts docopt.Opts) {
 	env, _ := opts.String("<env>")
 	service, _ := opts.String("<service>")
+	onlyOlder, _ := opts.Bool("--only-older")
+	initializeUnset, _ := opts.Bool("--initialize-unset")
+	setLatest, _ := opts.Bool("--set-latest")
+	preflight, _ := opts.Bool("--preflight")
+	allowMissingImage, _ := opts.Bool("--allow-missing-image")
+	if allowMissingImage && !preflight {
+		panic("--allow-missing-image requires --preflight.")
+	}
+	if initializeUnset && (!onlyOlder || setLatest) {
+		panic("--initialize-unset requires --only-older and cannot be combined with --set-latest.")
+	}
 
 	state := getWarpState()
 
@@ -682,13 +706,39 @@ func deploy(opts docopt.Opts) {
 	if len(deployBlocks) == 0 {
 		panic("No matching blocks.")
 	}
-
-	if onlyOlder, _ := opts.Bool("--only-older"); onlyOlder {
-		blockCurrentVersions, err := sampleBlockCurrentVersions(env, service, deployBlocks...)
+	// The dry run and real deployment share selector/readiness checks. Neither
+	// an HTTP 404 nor an eventually consistent read proves a bootstrap is safe.
+	if !initializeUnset || preflight {
+		versions, err := verifyDeploymentSelectors(context.Background(), dc, env, service, deployBlocks, initializeUnset)
 		if err != nil {
-			panic(fmt.Errorf("--only-older cannot verify running versions: %w", err))
+			panic(err)
 		}
-		filteredDeployBlocks, err := filterOlderDeployBlocks(deployVersion, deployBlocks, blockCurrentVersions)
+		if allowMissingImage {
+			for _, current := range versions {
+				image := fmt.Sprintf("%s/%s-%s:%s", state.warpSettings.RequireDockerNamespace(), env, service, convertVersionToDocker(current))
+				cmd := docker("buildx", "imagetools", "inspect", image)
+				cmd.Dir = state.warpVersionHome
+				if err := runAndLog(cmd); err != nil {
+					panic(fmt.Errorf("cannot read current deployment image during preflight: %w", err))
+				}
+			}
+		}
+	}
+
+	initializeBlocks := map[string]bool{}
+	if onlyOlder {
+		var filteredDeployBlocks []string
+		if initializeUnset {
+			filteredDeployBlocks, initializeBlocks, err = prepareInitializedDeployment(
+				context.Background(), dc, env, service, deployVersion, deployBlocks, deploySampleBlockCurrentVersions,
+			)
+		} else {
+			var blockCurrentVersions map[string]map[semver.Version]float32
+			blockCurrentVersions, err = deploySampleBlockCurrentVersions(env, service, deployBlocks...)
+			if err == nil {
+				filteredDeployBlocks, err = filterOlderDeployBlocks(deployVersion, deployBlocks, blockCurrentVersions)
+			}
+		}
 		if err != nil {
 			panic(fmt.Errorf("--only-older cannot verify running versions: %w", err))
 		}
@@ -699,24 +749,38 @@ func deploy(opts docopt.Opts) {
 		deployBlocks = filteredDeployBlocks
 	}
 
+	imageName := fmt.Sprintf("%s/%s-%s", state.warpSettings.RequireDockerNamespace(), env, service)
+	sourceImageName := fmt.Sprintf("%s:%s", imageName, convertVersionToDocker(deployVersion))
+	if !allowMissingImage {
+		// Prove the versioned image exists before any selector can start it.
+		// The worker pulls this immutable version, not a <block>-latest tag.
+		cmd := docker("buildx", "imagetools", "inspect", sourceImageName)
+		cmd.Dir = state.warpVersionHome
+		if err := runAndLog(cmd); err != nil {
+			panic(fmt.Errorf("cannot verify versioned deployment image: %w", err))
+		}
+	}
+	if preflight {
+		if allowMissingImage {
+			Out.Printf("Preflight passed for %s/%s; future image %s is expected to be built later and was not checked. No mutations performed.", env, service, sourceImageName)
+		} else {
+			Out.Printf("Preflight passed for %s/%s, including versioned image %s. No mutations performed.", env, service, sourceImageName)
+		}
+		return
+	}
+
 	announceDeployStarted(env, service, deployBlocks, deployVersion)
 
 	for _, block := range deployBlocks {
+		if initializeBlocks[block] {
+			if err := dc.InitializeVersion(context.Background(), env, service, block, deployVersion); err != nil {
+				panic(err)
+			}
+			Err.Printf("Initialized %s block %s to %s through its deployment selector; latest tag unchanged.", service, block, deployVersion)
+			continue
+		}
 		// remove tag <block>-latest from current image
 		// tag target image with <block>-latest
-
-		imageName := fmt.Sprintf(
-			"%s/%s-%s",
-			state.warpSettings.RequireDockerNamespace(),
-			env,
-			service,
-		)
-
-		sourceImageName := fmt.Sprintf(
-			"%s:%s",
-			imageName,
-			convertVersionToDocker(deployVersion),
-		)
 		deployImageName := fmt.Sprintf(
 			"%s:%s-latest",
 			imageName,
@@ -736,7 +800,7 @@ func deploy(opts docopt.Opts) {
 
 		Err.Printf("Deployed %s -> %s\n", sourceImageName, deployImageName)
 	}
-	if setLatest, _ := opts.Bool("--set-latest"); setLatest {
+	if setLatest {
 		imageName := fmt.Sprintf(
 			"%s/%s-%s",
 			state.warpSettings.RequireDockerNamespace(),
@@ -767,15 +831,17 @@ func deploy(opts docopt.Opts) {
 	// it's not possible to reach the status routes via the external hostname
 	// the /status routes will not have consistent ports for transparent lbs
 
-	if !transparent {
+	if timeout == 0 {
+		Out.Printf("Version promoted; skipping convergence polling because --timeout is 0.")
+	} else if !transparent {
 		// poll the load balancer for the specific blocks until the versions stabilize
 		Out.Printf("Block status:")
-		pollLbBlockStatusUntil(env, service, deployBlocks, deployVersion, timeout)
+		deployPollBlockStatusUntil(env, service, deployBlocks, deployVersion, timeout)
 
 		if reflect.DeepEqual(orderedBlocks, deployBlocks) {
 			// poll the load balancer for all blocks until the version stabilizes
 			Out.Printf("Service status:")
-			pollLbServiceStatusUntil(env, service, deployVersion, timeout)
+			deployPollServiceStatusUntil(env, service, deployVersion, timeout)
 		}
 	} else {
 		Out.Printf("Will not poll status because service is transparent.")

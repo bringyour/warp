@@ -786,10 +786,23 @@ type TlsKey struct {
 
 func NewNginxConfig(env string, envAliases []string) (*NginxConfig, error) {
 	servicesConfig := getServicesConfig(env)
+	hosts := servicesConfig.Hostnames(env, envAliases)
+
+	// a no_access_log host the lb does not serve is most likely a misspelling,
+	// which would leave the host that was meant logged
+	servedHosts := map[string]bool{}
+	for _, host := range hosts {
+		servedHosts[strings.TrimSuffix(strings.ToLower(host), ".")] = true
+	}
+	for _, host := range servicesConfig.NoAccessLogHosts() {
+		if !servedHosts[host] {
+			return nil, fmt.Errorf("no_access_log names %s, which the lb does not serve", host)
+		}
+	}
 
 	// find keys for the service expose domains
 	domainTlsKeys := map[string]*TlsKey{}
-	for _, host := range servicesConfig.Hostnames(env, envAliases) {
+	for _, host := range hosts {
 		var tlsKey *TlsKey
 		var err error
 
@@ -1201,6 +1214,13 @@ func (self *NginxConfig) addNginxConfig() {
 		panic(fmt.Sprintf("Lb has neither http or stream: %s", self.lbBlockInfo.block))
 	}
 
+	// with no_access_log empty the access_log stays unconditional, and the
+	// generated config is what it was before no_access_log existed
+	accessLogCondition := ""
+	if 0 < len(self.servicesConfig.NoAccessLogHosts()) {
+		accessLogCondition = " if=$warp_loggable"
+	}
+
 	if hasHttp {
 		self.block("http", func() {
 			self.raw(`
@@ -1251,7 +1271,7 @@ func (self *NginxConfig) addNginxConfig() {
                                     '$host "$request" $status $body_bytes_sent $request_time '
                                     '$upstream_addr $upstream_status $upstream_response_time '
                                     '"$http_user_agent"';
-            access_log /dev/stdout noclientaddr;
+            access_log /dev/stdout noclientaddr{{.accessLogCondition}};
             # nginx appends ", client: <addr>" to request-scoped error entries
             # itself and there is no log_format for the error log, so the
             # address here can only be removed downstream of nginx.
@@ -1305,7 +1325,11 @@ func (self *NginxConfig) addNginxConfig() {
             # enough for those generated keys.
             map_hash_bucket_size 128;
 
-            `)
+            `, map[string]any{
+				"accessLogCondition": accessLogCondition,
+			})
+
+			self.addNoAccessLogHosts()
 
 			// nginx renders an ipv6 $remote_addr WITHOUT brackets, so
 			// "$remote_addr:$remote_port" is ambiguous for a compressed ipv6 --
@@ -1402,6 +1426,35 @@ func (self *NginxConfig) rateLimitStatusPaths() []string {
 	paths := maps.Keys(statusPaths)
 	sort.Strings(paths)
 	return paths
+}
+
+// Defines $warp_loggable, the access_log condition: 0 for a request to a host
+// in services.yml no_access_log, so the access log gets no line for it at all.
+// Keying on $host rather than on a server block covers every server a request
+// to the host can reach, the port 80 redirect that shares one server with the
+// service's other hosts included, and nginx normalizes $host (lowercase, no
+// port, no trailing dot) before the map compares it.
+func (self *NginxConfig) addNoAccessLogHosts() {
+	hosts := self.servicesConfig.NoAccessLogHosts()
+	if len(hosts) == 0 {
+		return
+	}
+
+	self.raw(`
+    # services.yml no_access_log: no access log line for these hosts
+    `)
+	self.block("map $host $warp_loggable", func() {
+		self.raw(`
+        default 1;
+        `)
+		for _, host := range hosts {
+			self.raw(`
+            {{.host}} 0;
+            `, map[string]any{
+				"host": host,
+			})
+		}
+	})
 }
 
 func (self *NginxConfig) addRateLimits() {
@@ -2068,7 +2121,7 @@ func (self *NginxConfig) addServiceBlocks() {
 	                                    # see https://enable-cors.org/server_nginx.html
 	                                    add_header 'Access-Control-Allow-Origin' $cors_origin always;
 	                                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-	                                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,X-UR-ClientInfo,Authorization,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
+	                                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,X-Client-Version,X-UR-ClientInfo,X-UR-Intended-Network-Id,Authorization,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
 	                                    add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range,Accept,Mcp-Session-Id,MCP-Protocol-Version,Last-Event-ID' always;
 	                                    `)
 										// No service is sent credentialed cross-origin requests:

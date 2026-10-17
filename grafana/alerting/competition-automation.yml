@@ -1,0 +1,119 @@
+# Versioned competition automation is opt-in. These aggregate alerts neither
+# disclose embargoed candidates nor equate delivery acknowledgment with payment.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: sim-latency-automation
+    folder: urnetwork alerts
+    interval: 20s
+    rules:
+      - uid: competition-automation-reward-receipt-lag
+        title: CompetitionAutomationRewardReceiptLag
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env) (urnetwork_competition_automation_oldest_reward_event_age_seconds)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {params: [300], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels: {service: sim-latency, severity: warn}
+        annotations:
+          summary: Published reward decisions in {{ $labels.env }} lack an integration receipt.
+          description: Reconcile the cursor feed and exact idempotent receipt. Do not create a new election or infer payment, clawback, or source approval from a delivery retry.
+        isPaused: false
+
+      - uid: competition-automation-capability-held
+        title: CompetitionAutomationCapabilityHeld
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 120, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: max by (env, kind) (urnetwork_competition_automation_hold_active)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {params: [0], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels: {service: sim-latency, severity: warn}
+        annotations:
+          summary: Competition {{ $labels.kind }} in {{ $labels.env }} is paused.
+          description: Inspect the authorized hold and incident evidence. Releasing one hold is not source approval, permission to rewrite measurements, or recovery of an invalidated round.
+        isPaused: false
+
+      - uid: competition-automation-supervisor-stale
+        title: CompetitionAutomationSupervisorStale
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 120, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: '(max by (env) (urnetwork_competition_automation_supervisor_expected) == 1) unless on (env) (min by (env) (urnetwork_competition_automation_supervisor_heartbeat_age_seconds >= 0) <= 30)'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {params: [0], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: {service: sim-latency, severity: warn}
+        annotations:
+          summary: Competition automation supervisor heartbeat in {{ $labels.env }} is older than 30 seconds.
+          description: Check the fenced lease and restart the reconciler with the same scope. Never bypass source readiness or rewrite a round to recover.
+        isPaused: false

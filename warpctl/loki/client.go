@@ -235,10 +235,20 @@ func (self *Client) printEntry(entry *logEntry) {
 type queryError struct {
 	statusCode int
 	message    string
+	// Only a valid 429 Retry-After supplies operation-local retry admission.
+	// This advice is not a client-wide or cross-command cooldown.
+	retryAfter time.Time
 }
 
 func (self *queryError) Error() string {
 	return fmt.Sprintf("Loki query error (%d): %s", self.statusCode, self.message)
+}
+
+// A missing or invalid hint preserves the existing bounded retry behavior.
+// Compare both the planned attempt and its actual wake time so a clock moving
+// backwards cannot admit an attempt before an absolute HTTP-date hint.
+func (self *queryError) retryAllowedAt(now time.Time) bool {
+	return self.retryAfter.IsZero() || !now.Before(self.retryAfter)
 }
 
 func (self *Client) queryRange(
@@ -269,6 +279,13 @@ func (self *Client) queryRange(
 		}
 
 		delay := time.Duration(attempt) * queryRangeRetryBaseDelay
+		var queryErr *queryError
+		if errors.As(err, &queryErr) && !queryErr.retryAllowedAt(time.Now().Add(delay)) {
+			// Do not extend this operation's existing waits or send a retry
+			// earlier than explicit server advice. Keep the original typed
+			// failure; a caller owns any later operation and its coverage.
+			return nil, err
+		}
 		if self.errLog != nil {
 			self.errLog.Printf(
 				"Loki query attempt %d/%d failed (%s). Retrying in %s.\n",
@@ -290,6 +307,12 @@ func (self *Client) queryRange(
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if queryErr != nil && !queryErr.retryAllowedAt(time.Now()) {
+			return nil, err
+		}
 	}
 	return nil, lastErr
 }
@@ -308,15 +331,33 @@ func (self *Client) queryRangeOnce(ctx context.Context, requestUrl string) (*que
 		return nil, err
 	}
 	defer response.Body.Close()
+	// Delta-seconds starts at header receipt, not after a slow body read.
+	responseAt := time.Now()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
 	if response.StatusCode != 200 {
-		return nil, &queryError{
+		queryErr := &queryError{
 			statusCode: response.StatusCode,
 			message:    strings.TrimSpace(string(body)),
 		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			values := response.Header.Values("Retry-After")
+			if len(values) == 1 {
+				value := strings.TrimSpace(values[0])
+				seconds, parseErr := strconv.ParseInt(value, 10, 64)
+				digits := value != "" && strings.IndexFunc(value, func(c rune) bool {
+					return c < '0' || c > '9'
+				}) < 0
+				if digits && parseErr == nil && seconds <= int64((1<<63-1)/time.Second) {
+					queryErr.retryAfter = responseAt.Add(time.Duration(seconds) * time.Second)
+				} else if retryAfter, parseErr := http.ParseTime(value); parseErr == nil {
+					queryErr.retryAfter = retryAfter
+				}
+			}
+		}
+		return nil, queryErr
 	}
 
 	var queryRangeResponse queryRangeResponse

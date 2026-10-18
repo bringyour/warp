@@ -235,8 +235,8 @@ func (self *Client) printEntry(entry *logEntry) {
 type queryError struct {
 	statusCode int
 	message    string
-	// Only a valid 429 Retry-After supplies operation-local retry admission.
-	// This advice is not a client-wide or cross-command cooldown.
+	// Only a valid 429 Retry-After supplies retry admission. The CLI can
+	// pass terminal advice to its retry owner; no client-global state is kept.
 	retryAfter time.Time
 }
 
@@ -343,19 +343,7 @@ func (self *Client) queryRangeOnce(ctx context.Context, requestUrl string) (*que
 			message:    strings.TrimSpace(string(body)),
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
-			values := response.Header.Values("Retry-After")
-			if len(values) == 1 {
-				value := strings.TrimSpace(values[0])
-				seconds, parseErr := strconv.ParseInt(value, 10, 64)
-				digits := value != "" && strings.IndexFunc(value, func(c rune) bool {
-					return c < '0' || c > '9'
-				}) < 0
-				if digits && parseErr == nil && seconds <= int64((1<<63-1)/time.Second) {
-					queryErr.retryAfter = responseAt.Add(time.Duration(seconds) * time.Second)
-				} else if retryAfter, parseErr := http.ParseTime(value); parseErr == nil {
-					queryErr.retryAfter = retryAfter
-				}
-			}
+			queryErr.retryAfter = parseRetryAfter(response.Header, responseAt)
 		}
 		return nil, queryErr
 	}
@@ -611,11 +599,21 @@ func (self *Client) LiveTail(
 				return err
 			}
 			backoff := time.Duration(connectAttempt) * time.Second
+			retryAfter := retryAfterTime(err)
+			if !retryAfter.IsZero() && time.Now().Add(backoff).Before(retryAfter) {
+				return err
+			}
 			self.errLog.Printf("Tail connect error (%s). Reconnecting in %s.\n", err, backoff)
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-time.After(backoff):
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			if !retryAfter.IsZero() && time.Now().Before(retryAfter) {
+				return err
 			}
 			continue
 		}
@@ -693,8 +691,19 @@ func (self *Client) dialTail(ctx context.Context, logql string, start int64) (*w
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 30 * time.Second,
 	}
-	conn, _, err := dialer.DialContext(ctx, tailUrl, header)
+	conn, response, err := dialer.DialContext(ctx, tailUrl, header)
+	responseAt := time.Now()
 	if err != nil {
+		if response != nil {
+			if response.Body != nil {
+				defer response.Body.Close()
+			}
+			if response.StatusCode == http.StatusTooManyRequests {
+				// Gorilla returns after its bounded error-body read. This time
+				// is conservative for delta-seconds; absolute dates are exact.
+				err = &tailConnectError{err: err, retryAfter: parseRetryAfter(response.Header, responseAt)}
+			}
+		}
 		return nil, err
 	}
 	return conn, nil

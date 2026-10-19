@@ -10,8 +10,9 @@ import (
 // reset code could not be sent", an immutable upload that failed its
 // readback). With http_502 and non_idempotent in proxy_next_upstream, nginx
 // re-executed those POSTs on a sibling block, so one password reset made two
-// codes and two SMS attempts on 2026-10-19. Connection failures and refused
-// connects stay covered by error, and a draining API answers 503.
+// codes and two SMS attempts on 2026-10-19. A draining upstream stays covered:
+// its closed listener, or a keepalive connection cut at shutdown, is error, and
+// a draining API answers neither 502 nor 503.
 func TestNginxConfigRetriesNoUpstreamApplication502(t *testing.T) {
 	servicesYaml, err := testServicesFS.ReadFile("testdata/services.yml")
 	if err != nil {
@@ -39,7 +40,7 @@ func TestNginxConfigRetriesNoUpstreamApplication502(t *testing.T) {
 			}
 			for _, kept := range []string{"error", "timeout", "http_503"} {
 				if !conditions[kept] {
-					t.Errorf("block %s no longer retries %s over a draining upstream: %q", blockName, kept, line)
+					t.Errorf("block %s no longer retries %s: %q", blockName, kept, line)
 				}
 			}
 		}

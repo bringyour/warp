@@ -120,6 +120,8 @@ type RunWorker struct {
 	heldConfigVersion              *semver.Version
 	nextRoutingTableReconcile      time.Time
 	nextDuplicateRedirectReconcile time.Time
+	// the poll line last logged (run_poll_log.go)
+	polledVersionsLog polledVersionsLog
 
 	quitEvent *warp.Event
 
@@ -298,7 +300,10 @@ func (self *RunWorker) Run() {
 				Err.Printf("Polled latest version error: %s\n", err)
 				deployable = false
 			} else {
-				Err.Printf("Polled latest versions: %s, %s\n", latestVersion, latestConfigVersion)
+				pollLine := fmt.Sprintf("Polled latest versions: %s, %s", latestVersion, latestConfigVersion)
+				if self.polledVersionsLog.shouldLog(pollLine, time.Now()) {
+					Err.Printf("%s\n", pollLine)
+				}
 				deployable = func() bool {
 					switch self.configMountMode {
 					case MOUNT_MODE_NO, MOUNT_MODE_ROOT:
@@ -451,8 +456,7 @@ func (self *RunWorker) getLatestVersion() (latestVersion *semver.Version, latest
 		return nil, nil, fmt.Errorf("unable to get latest version: %w", err)
 	}
 
-	Err.Printf("Latest version (%s, %s, %s) = %s\n", self.env, self.service, self.block, v)
-
+	// the run loop logs the polled versions (polledVersionsLog), not every read
 	latestVersion, err = semver.NewVersion(v)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to parse latest version: %w", err)

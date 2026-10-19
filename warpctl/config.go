@@ -1306,11 +1306,13 @@ func (self *NginxConfig) addNginxConfig() {
             proxy_http_version 1.1;
             proxy_socket_keepalive on;
             # retry classes are deliberately narrow (APIDRAIN1.md server repo §2.4):
-            # error/timeout/502/503 ride over a draining or flipping upstream;
-            # http_500 and http_504 are excluded so a deterministic application
-            # error is never re-executed on a sibling (with non_idempotent that
-            # would double-run POSTs)
-            proxy_next_upstream error timeout http_502 http_503 non_idempotent;
+            # error/timeout/503 ride over a draining or flipping upstream (a
+            # refused or reset connection is error; a draining api answers 503).
+            # An upstream's own 500, 502 or 504 is an application answer, and
+            # with non_idempotent a retry would re-execute the POST on a sibling:
+            # the api answers 502 when a dependency refused the work, and on
+            # 2026-10-19 one password reset made two codes and two SMS sends
+            proxy_next_upstream error timeout http_503 non_idempotent;
             proxy_next_upstream_tries 2;
             proxy_connect_timeout 30s;
             proxy_read_timeout 30s;

@@ -9,10 +9,13 @@
 # held thousands of queued clients and no server for minutes (19:36Z-20:07Z
 # and 21:10Z-21:17Z) while postgres stayed up, and nothing alerted.
 #
-# only rules are provisioned here: contact points and notification policies
-# are managed in the grafana ui (state lives in the env postgres). rules fire
-# with a severity label (page | warn) for the operator to route on.
-# file provisioned rules are read only in the ui; edit this file and redeploy.
+# only rules are provisioned here. contact points and the notification-policy
+# tree are reconciled in code by `bringyourctl grafana reconcile-alerting`
+# (server grafana/alert_routing.go): the slack contact point from vault
+# monitor.yml is the root receiver, so every alert no child route matches,
+# including these, reaches the monitor's slack channel. rules fire with a
+# severity label (page | warn). file provisioned rules are read only in the ui;
+# edit this file and redeploy.
 apiVersion: 1
 groups:
   - orgId: 1

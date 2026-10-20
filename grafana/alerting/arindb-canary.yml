@@ -22,9 +22,13 @@
 # OK here: a build without the canary exports none, and a stalled indexer keeps
 # its last decision time, which the stale rules catch.
 #
-# only rules are provisioned here: contact points and notification policies
-# are managed in the grafana ui. rules fire with a severity label (page | warn)
-# for the operator to route on. edit this file and redeploy.
+# only rules are provisioned here. contact points and the notification-policy
+# tree are reconciled in code by `bringyourctl grafana reconcile-alerting`
+# (server grafana/alert_routing.go): the slack contact point from vault
+# monitor.yml is the root receiver, so every alert no child route matches,
+# including these, reaches the monitor's slack channel. rules fire with a
+# severity label (page | warn). file provisioned rules are read only in the ui;
+# edit this file and redeploy.
 apiVersion: 1
 groups:
   - orgId: 1

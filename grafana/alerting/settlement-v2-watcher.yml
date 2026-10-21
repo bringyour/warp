@@ -1,0 +1,91 @@
+# Settlement v2 watcher availability on Planetoid. Deploy these rules only
+# after step 15 registers the UR pool in vault2: earlier checks intentionally
+# fail because the pool does not exist (xops main/ansible/
+# SN-MAINNET-SETTLEMENT-V2-WATCHER.md, "Alerts").
+#
+# record-run.sh emits Unix seconds; Planetoid's Fluent Bit textfile collector
+# adds env=main, host=planetoid and job=node. Missing telemetry alerts too.
+# Contact points and routing use bringyourctl grafana reconcile-alerting;
+# the service label falls through to the normal default receiver.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: sn-settlement-v2-watcher
+    folder: urnetwork alerts
+    interval: 1m
+    rules:
+      - uid: sn-settlement-v2-watcher-no-run
+        title: SettlementV2WatcherNoRun
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'time() - max(sn_settlement_v2_watcher_last_run_timestamp_seconds{env="main",host="planetoid",job="node"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [7200], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: Alerting
+        execErrState: Error
+        for: 0s
+        labels: {service: sn-settlement-v2-watcher, severity: page}
+        annotations:
+          summary: "Planetoid has completed no settlement v2 watcher run for over two hours, or its run timestamp is missing."
+        isPaused: false
+
+      - uid: sn-settlement-v2-watcher-no-success
+        title: SettlementV2WatcherNoSuccess
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              editorMode: code
+              expr: 'time() - max(sn_settlement_v2_watcher_last_success_timestamp_seconds{env="main",host="planetoid",job="node"})'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: __auto
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              datasource: {type: __expr__, uid: __expr__}
+              expression: A
+              conditions:
+                - evaluator: {params: [10800], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: Alerting
+        execErrState: Error
+        for: 0s
+        labels: {service: sn-settlement-v2-watcher, severity: page}
+        annotations:
+          summary: "Planetoid has completed no successful settlement v2 watcher run for over three hours, or its success timestamp is missing."
+        isPaused: false

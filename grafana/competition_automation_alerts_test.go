@@ -23,13 +23,14 @@ func TestCompetitionAutomationAlertsRouteWithoutCandidateLabels(t *testing.T) {
 	for _, required := range []string{
 		"interval: 20s", "automation_oldest_reward_event_age_seconds",
 		"automation_supervisor_heartbeat_age_seconds", "automation_supervisor_expected", "automation_hold_active", "<= 30", "params: [300]",
+		"automation_progression_blocked", "competition-automation-closing-blocked", "support@ur.xyz",
 	} {
 		if !strings.Contains(config, required) {
 			t.Errorf("missing %q", required)
 		}
 	}
-	if count := strings.Count(config, "labels: {service: sim-latency, severity: warn}"); count != 3 {
-		t.Fatalf("routed rules = %d, want 3", count)
+	if count := strings.Count(config, "labels: {service: sim-latency, severity: warn}"); count != 4 {
+		t.Fatalf("routed rules = %d, want 4", count)
 	}
 	for _, forbidden := range []string{"job_id", "patch_sha256", "raw_score", "normalized_score"} {
 		if strings.Contains(config, forbidden) {

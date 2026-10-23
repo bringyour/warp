@@ -7,6 +7,41 @@ groups:
     folder: urnetwork alerts
     interval: 20s
     rules:
+      - uid: competition-automation-closing-blocked
+        title: CompetitionAutomaticClosingBlocked
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: {from: 120, to: 0}
+            datasourceUid: warp-mimir
+            model:
+              refId: A
+              expr: max by (env) (urnetwork_competition_automation_progression_blocked)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {params: [0], type: gt}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {params: [], type: last}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: {service: sim-latency, severity: warn}
+        annotations:
+          summary: Competition automatic epoch closing in {{ $labels.env }} requires support.
+          description: Contact support@ur.xyz. Inspect the durable review/build/readiness checkpoint and private evidence. Missing or expired review never means approval; do not promote an alternate source or reset the review deadline to bypass a block.
+        isPaused: false
       - uid: competition-automation-reward-receipt-lag
         title: CompetitionAutomationRewardReceiptLag
         condition: B

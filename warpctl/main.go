@@ -1767,12 +1767,14 @@ func logs(opts docopt.Opts) {
 
 	err := lc.Search(ctx, env, service, blocks, query, start, limit)
 	if err != nil {
+		loki.WriteRetryAfterDiagnostic(Err.Writer(), err)
 		panic(err)
 	}
 
 	if follow, _ := opts.Bool("-f"); follow {
 		err = lc.LiveTail(ctx, env, service, blocks, query)
 		if err != nil {
+			loki.WriteRetryAfterDiagnostic(Err.Writer(), err)
 			panic(err)
 		}
 	}

@@ -1,7 +1,9 @@
 # sim-latency competition alerts. The main API and singleton competition
 # worker push these bounded metrics into Mimir; MinIO exporter metrics provide
-# the durable-evidence capacity boundary. Contact points and routing remain in
-# the existing Grafana notification policy.
+# the durable-evidence capacity boundary. Contact points and routing are
+# reconciled in code by `bringyourctl grafana reconcile-alerting` (server
+# grafana/alert_routing.go): service=sim-latency warn and page alerts route to
+# the competition support email, everything else to the slack root receiver.
 apiVersion: 1
 groups:
   - orgId: 1

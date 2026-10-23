@@ -235,10 +235,20 @@ func (self *Client) printEntry(entry *logEntry) {
 type queryError struct {
 	statusCode int
 	message    string
+	// Only a valid 429 Retry-After supplies retry admission. The CLI can
+	// pass terminal advice to its retry owner; no client-global state is kept.
+	retryAfter time.Time
 }
 
 func (self *queryError) Error() string {
 	return fmt.Sprintf("Loki query error (%d): %s", self.statusCode, self.message)
+}
+
+// A missing or invalid hint preserves the existing bounded retry behavior.
+// Compare both the planned attempt and its actual wake time so a clock moving
+// backwards cannot admit an attempt before an absolute HTTP-date hint.
+func (self *queryError) retryAllowedAt(now time.Time) bool {
+	return self.retryAfter.IsZero() || !now.Before(self.retryAfter)
 }
 
 func (self *Client) queryRange(
@@ -269,6 +279,13 @@ func (self *Client) queryRange(
 		}
 
 		delay := time.Duration(attempt) * queryRangeRetryBaseDelay
+		var queryErr *queryError
+		if errors.As(err, &queryErr) && !queryErr.retryAllowedAt(time.Now().Add(delay)) {
+			// Do not extend this operation's existing waits or send a retry
+			// earlier than explicit server advice. Keep the original typed
+			// failure; a caller owns any later operation and its coverage.
+			return nil, err
+		}
 		if self.errLog != nil {
 			self.errLog.Printf(
 				"Loki query attempt %d/%d failed (%s). Retrying in %s.\n",
@@ -290,6 +307,12 @@ func (self *Client) queryRange(
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if queryErr != nil && !queryErr.retryAllowedAt(time.Now()) {
+			return nil, err
+		}
 	}
 	return nil, lastErr
 }
@@ -308,15 +331,21 @@ func (self *Client) queryRangeOnce(ctx context.Context, requestUrl string) (*que
 		return nil, err
 	}
 	defer response.Body.Close()
+	// Delta-seconds starts at header receipt, not after a slow body read.
+	responseAt := time.Now()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
 	if response.StatusCode != 200 {
-		return nil, &queryError{
+		queryErr := &queryError{
 			statusCode: response.StatusCode,
 			message:    strings.TrimSpace(string(body)),
 		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			queryErr.retryAfter = parseRetryAfter(response.Header, responseAt)
+		}
+		return nil, queryErr
 	}
 
 	var queryRangeResponse queryRangeResponse
@@ -570,11 +599,21 @@ func (self *Client) LiveTail(
 				return err
 			}
 			backoff := time.Duration(connectAttempt) * time.Second
+			retryAfter := retryAfterTime(err)
+			if !retryAfter.IsZero() && time.Now().Add(backoff).Before(retryAfter) {
+				return err
+			}
 			self.errLog.Printf("Tail connect error (%s). Reconnecting in %s.\n", err, backoff)
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-time.After(backoff):
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			if !retryAfter.IsZero() && time.Now().Before(retryAfter) {
+				return err
 			}
 			continue
 		}
@@ -652,8 +691,19 @@ func (self *Client) dialTail(ctx context.Context, logql string, start int64) (*w
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 30 * time.Second,
 	}
-	conn, _, err := dialer.DialContext(ctx, tailUrl, header)
+	conn, response, err := dialer.DialContext(ctx, tailUrl, header)
+	responseAt := time.Now()
 	if err != nil {
+		if response != nil {
+			if response.Body != nil {
+				defer response.Body.Close()
+			}
+			if response.StatusCode == http.StatusTooManyRequests {
+				// Gorilla returns after its bounded error-body read. This time
+				// is conservative for delta-seconds; absolute dates are exact.
+				err = &tailConnectError{err: err, retryAfter: parseRetryAfter(response.Header, responseAt)}
+			}
+		}
 		return nil, err
 	}
 	return conn, nil

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM ubuntu:24.04
 # https://www.docker.com/blog/faster-multi-platform-builds-dockerfile-cross-compilation-guide/
 
@@ -14,6 +15,8 @@ RUN update-ca-certificates
 COPY build/$TARGETPLATFORM/config-updater /usr/local/sbin/config-updater
 
 RUN mkdir -p /root/config
-ADD build/$WARP_ENV/config /root/config
+# Keep the complete versioned resource tree in an independent layer so both
+# target architectures can share it without copying it into each base snapshot.
+COPY --link build/$WARP_ENV/config /root/config
 
 CMD ["/usr/local/sbin/config-updater", "/root/config", "/srv/warp/config"]
